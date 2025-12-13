@@ -152,13 +152,13 @@ def webhook():
     # ===== SEND ID =====
     if text == "📩 Gửi ID kích hoạt":
         if get_user_row(user_id):
-            tg_send(chat_id, f"🆔 ID của bạn: <b>{user_id}</b>\n⏳ Chờ admin kích hoạt.")
+            tg_send(chat_id, f"🆔 ID của bạn: <b>{user_id}</b>\n⏳ Chờ admin @BonBonxHPx kích hoạt.")
         else:
             ws_money.append_row([str(user_id), username, 0, "pending", "auto từ bot"])
             tg_send(
                 chat_id,
                 f"📩 Đã gửi ID!\n🆔 ID: <b>{user_id}</b>\n"
-                "Vui lòng nhắn tin ADMIN để nạp tiền."
+                "Vui lòng nhắn tin ADMIN @BonBonxHPx để nạp tiền."
             )
         return jsonify(ok=True)
 
