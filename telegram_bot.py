@@ -1,24 +1,26 @@
 # -*- coding: utf-8 -*-
-import os, time, json, requests
+import os, json, requests
 from datetime import datetime
-from dotenv import load_dotenv
+from flask import Flask, request, jsonify
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# ================= LOAD ENV =================
-load_dotenv()
-
+# ================== ENV ==================
 BOT_TOKEN   = os.getenv("TELEGRAM_TOKEN")
 SHEET_ID   = os.getenv("GOOGLE_SHEET_ID")
 CREDS_JSON = os.getenv("GOOGLE_SHEETS_CREDS_JSON")
 
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-# ================= GOOGLE SHEET =================
+# ================== APP ==================
+app = Flask(__name__)
+
+# ================== GOOGLE SHEET ==================
 scope = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive"
 ]
+
 creds = ServiceAccountCredentials.from_json_keyfile_dict(
     json.loads(CREDS_JSON), scope
 )
@@ -29,10 +31,10 @@ ws_money   = sh.worksheet("Thanh Toan")
 ws_voucher = sh.worksheet("VoucherStock")
 ws_log     = sh.worksheet("Logs")
 
-# ================= STATE =================
+# ================== STATE ==================
 PENDING_VOUCHER = {}
 
-# ================= TELEGRAM =================
+# ================== TELEGRAM ==================
 def tg_send(chat_id, text, reply_markup=None):
     payload = {
         "chat_id": chat_id,
@@ -41,7 +43,7 @@ def tg_send(chat_id, text, reply_markup=None):
     }
     if reply_markup:
         payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
-    requests.post(f"{BASE_URL}/sendMessage", data=payload)
+    requests.post(f"{BASE_URL}/sendMessage", data=payload, timeout=10)
 
 def tg_hide(chat_id, text):
     payload = {
@@ -50,14 +52,13 @@ def tg_hide(chat_id, text):
         "parse_mode": "HTML",
         "reply_markup": json.dumps({"remove_keyboard": True})
     }
-    requests.post(f"{BASE_URL}/sendMessage", data=payload)
+    requests.post(f"{BASE_URL}/sendMessage", data=payload, timeout=10)
 
-# ================= USER =================
+# ================== HELPERS ==================
 def get_user_row(user_id):
     ids = ws_money.col_values(1)
     return ids.index(str(user_id)) + 1 if str(user_id) in ids else None
 
-# ================= VOUCHER =================
 def get_voucher(cmd):
     rows = ws_voucher.get_all_records()
     for r in rows:
@@ -67,230 +68,137 @@ def get_voucher(cmd):
             return r, None
     return None, "Không tìm thấy voucher"
 
-# ================= SHOPEE API =================
+# ================== SHOPEE ==================
 SAVE_URL = "https://shopee.vn/api/v2/voucher_wallet/save_vouchers"
 
-def save_voucher_and_check(cookie, voucher):
-    """
-    True  -> lưu MỚI thành công (có collect_time)
-    False -> lưu trùng / không đủ điều kiện / lỗi
-    """
+def save_voucher(cookie, v):
     payload = {
         "voucher_identifiers": [{
-            "promotion_id": int(voucher["Promotionid"]),
-            "voucher_code": voucher["CODE"],
-            "signature": voucher["Signature"],
+            "promotion_id": int(v["Promotionid"]),
+            "voucher_code": v["CODE"],
+            "signature": v["Signature"],
             "signature_source": 0
         }],
         "need_user_voucher_status": True
     }
 
     headers = {
-        "Accept": "application/json",
         "Content-Type": "application/json;charset=UTF-8",
         "User-Agent": "Mozilla/5.0",
-        "Origin": "https://autopee.vercel.app",
-        "Referer": "https://autopee.vercel.app/",
+        "Origin": "https://telegrambot.vercel.app",
+        "Referer": "https://telegrambot.vercel.app/",
         "Cookie": cookie
     }
 
-    try:
-        r = requests.post(SAVE_URL, headers=headers, json=payload, timeout=15)
-        if r.status_code != 200:
-            return False, f"HTTP_{r.status_code}"
+    r = requests.post(SAVE_URL, headers=headers, json=payload, timeout=15)
+    if r.status_code != 200:
+        return False
 
-        js = r.json()
+    js = r.json()
+    resp = js.get("responses", [{}])[0]
+    voucher_data = resp.get("data", {}).get("voucher", {})
+    return bool(voucher_data.get("collect_time"))
 
-        if "responses" not in js or not js["responses"]:
-            return False, "INVALID_RESPONSE"
+# ================== ROUTES ==================
+@app.route("/", methods=["GET"])
+def home():
+    return "🤖 Telegram Bot is running (Webhook OK)"
 
-        resp = js["responses"][0]
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    data = request.json
+    if not data or "message" not in data:
+        return jsonify(ok=True)
 
-        if resp.get("error") != 0:
-            return False, f"SHOPEE_{resp.get('error')}"
+    msg = data["message"]
+    chat_id = msg["chat"]["id"]
+    user_id = msg["from"]["id"]
+    username = msg["from"].get("username", "")
+    text = msg.get("text", "").strip()
 
-        voucher_data = resp.get("data", {}).get("voucher", {})
-        if voucher_data.get("collect_time"):
-            return True, "OK"
+    # ===== START =====
+    if text == "/start":
+        kb = {
+            "keyboard": [
+                ["📩 Gửi ID kích hoạt"],
+                ["/balance", "/voucherlist"]
+            ],
+            "resize_keyboard": True
+        }
+        tg_send(chat_id, "👋 Chào bạn!\nBấm nút dưới để gửi ID kích hoạt.", kb)
+        return jsonify(ok=True)
 
-        return False, "NOT_COLLECTED"
+    # ===== SEND ID =====
+    if text == "📩 Gửi ID kích hoạt":
+        if get_user_row(user_id):
+            tg_send(chat_id, f"🆔 ID của bạn: <b>{user_id}</b>\n⏳ Chờ admin kích hoạt.")
+        else:
+            ws_money.append_row([str(user_id), username, 0, "pending", "auto từ bot"])
+            tg_send(chat_id, f"📩 Đã gửi ID!\n🆔 <b>{user_id}</b>\nVui lòng nạp tiền.")
+        return jsonify(ok=True)
 
-    except requests.exceptions.Timeout:
-        return False, "TIMEOUT"
-    except Exception as e:
-        return False, f"EXCEPTION_{e}"
+    row = get_user_row(user_id)
+    if not row:
+        tg_send(chat_id, "❌ Chưa kích hoạt")
+        return jsonify(ok=True)
 
-# ================= MAIN =================
-def main():
-    print("🤖 Bot Telegram Voucher Started")
-    offset = 0
+    data_row = ws_money.row_values(row)
+    balance = int(data_row[2])
+    status  = data_row[3]
 
-    while True:
-        res = requests.get(
-            f"{BASE_URL}/getUpdates",
-            params={"timeout": 30, "offset": offset}
-        ).json()
+    if status != "active":
+        tg_send(chat_id, "❌ Tài khoản chưa active")
+        return jsonify(ok=True)
 
-        for upd in res.get("result", []):
-            offset = upd["update_id"] + 1
-            msg = upd.get("message")
-            if not msg:
-                continue
+    # ===== BALANCE =====
+    if text == "/balance":
+        tg_send(chat_id, f"💰 Số dư: <b>{balance}</b>")
+        return jsonify(ok=True)
 
-            chat_id = msg["chat"]["id"]
-            user_id = msg["from"]["id"]
-            username = msg["from"].get("username", "")
-            text = msg.get("text", "").strip()
+    # ===== LIST =====
+    if text == "/voucherlist":
+        rows = ws_voucher.get_all_records()
+        out = ["📦 <b>Voucher còn:</b>"]
+        for r in rows:
+            if r["Trạng Thái"] == "Còn Mã":
+                out.append(f"- /{r['Tên Mã']} | {r['Giá']}")
+        tg_send(chat_id, "\n".join(out))
+        return jsonify(ok=True)
 
-            # ===== START =====
-            if text == "/start":
-                kb = {
-                    "keyboard": [
-                        ["📩 Gửi ID kích hoạt"],
-                        ["/balance", "/voucherlist"]
-                    ],
-                    "resize_keyboard": True
-                }
-                tg_send(chat_id, "👋 Chào bạn!\nBấm nút dưới để gửi ID kích hoạt.", kb)
-                continue
+    # ===== HANDLE VOUCHER =====
+    parts = text.split(maxsplit=1)
+    cmd = parts[0].replace("/", "")
+    cookie = parts[1] if len(parts) > 1 else ""
 
-            # ===== SEND ID =====
-            if text == "📩 Gửi ID kích hoạt":
-                if get_user_row(user_id):
-                    tg_send(chat_id, f"🆔 ID của bạn: <b>{user_id}</b>\n⏳ Chờ admin @BonBonxHPx kích hoạt.")
-                else:
-                    ws_money.append_row([
-                        str(user_id), username, 0, "pending", "auto từ bot"
-                    ])
-                    tg_send(
-                        chat_id,
-                        f"📩 Đã gửi ID!\n🆔 ID: <b>{user_id}</b>\n"
-                        "Vui lòng nhắn tin ADMIN @BonBonxHPx để nạp tiền."
-                    )
-                continue
+    if cmd.startswith("voucher"):
+        if not cookie:
+            PENDING_VOUCHER[user_id] = cmd
+            tg_send(chat_id, "👉 Gửi cookie để lưu mã")
+            return jsonify(ok=True)
 
-            # ===== CHECK ACTIVE =====
-            row = get_user_row(user_id)
-            if not row:
-                tg_send(chat_id, "❌ Chưa kích hoạt")
-                continue
+        v, err = get_voucher(cmd)
+        if err:
+            tg_send(chat_id, f"❌ {err}")
+            return jsonify(ok=True)
 
-            data = ws_money.row_values(row)
-            balance = int(data[2])
-            status  = data[3]
+        price = int(v["Giá"])
+        if balance < price:
+            tg_send(chat_id, "❌ Không đủ số dư")
+            return jsonify(ok=True)
 
-            if status != "active":
-                tg_send(chat_id, "❌ Tài khoản chưa được kích hoạt")
-                continue
+        ok = save_voucher(cookie, v)
+        if not ok:
+            tg_send(chat_id, "❌ Lưu mã thất bại (không trừ tiền)")
+            return jsonify(ok=True)
 
-            # ===== BALANCE =====
-            if text == "/balance":
-                tg_send(chat_id, f"💰 Số dư: <b>{balance}</b>")
-                continue
+        new_bal = balance - price
+        ws_money.update_cell(row, 3, new_bal)
+        ws_log.append_row([
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            str(user_id), username, cmd, price, new_bal
+        ])
 
-            # ===== LIST =====
-            if text == "/voucherlist":
-                rows = ws_voucher.get_all_records()
-                out = ["📦 <b>Voucher còn:</b>"]
-                for r in rows:
-                    if r["Trạng Thái"] == "Còn Mã":
-                        out.append(f"- /{r['Tên Mã']} | {r['Giá']}")
-                out.append(
-                    "\n📝 <b>HƯỚNG DẪN</b>\n"
-                    "💰 <b>Giá:</b> 1000đ / 1 lượt lưu\n"
-                    "Cách 1️⃣: <code>/voucherxxx &lt;cookie&gt;</code>\n"
-                    "Cách 2️⃣: Bấm <code>/voucherxxx</code> → gửi cookie"
-                )
-                tg_send(chat_id, "\n".join(out))
-                continue
+        tg_hide(chat_id, f"✅ Thành công!\n💰 Còn lại: <b>{new_bal}</b>")
+        return jsonify(ok=True)
 
-            # ===== CÁCH 2: ĐANG CHỜ COOKIE =====
-            if user_id in PENDING_VOUCHER and not text.startswith("/"):
-                cmd = PENDING_VOUCHER.pop(user_id)
-                cookie = text.strip()
-
-                v, err = get_voucher(cmd)
-                if err:
-                    tg_send(chat_id, f"❌ {err}")
-                    continue
-
-                price = int(v["Giá"])
-                if balance < price:
-                    tg_send(chat_id, "❌ Không đủ số dư")
-                    continue
-
-                ok, reason = save_voucher_and_check(cookie, v)
-
-                if not ok:
-                    tg_send(chat_id, "❌ <b>Lưu mã thất bại</b>\n💸 Không trừ tiền")
-                    ws_log.append_row([
-                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        str(user_id), username, cmd, "FAIL", reason
-                    ])
-                    continue
-
-                new_bal = balance - price
-                ws_money.update_cell(row, 3, new_bal)
-                ws_log.append_row([
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    str(user_id), username, cmd, price, new_bal
-                ])
-
-                tg_hide(
-                    chat_id,
-                    "✅ <b>Thành công!</b>\n"
-                    f"💸 Đã trừ: <b>{price}</b>\n"
-                    f"💰 Số dư còn lại: <b>{new_bal}</b>"
-                )
-                continue
-
-            # ===== CÁCH 1: GÕ /voucher + cookie =====
-            parts = text.split(maxsplit=1)
-            cmd = parts[0].replace("/", "")
-            cookie = parts[1] if len(parts) > 1 else ""
-
-            if cmd.startswith("voucher"):
-                if not cookie:
-                    PENDING_VOUCHER[user_id] = cmd
-                    tg_send(chat_id, f"👉 Gửi <b>cookie</b> để lưu mã:\n<b>{cmd}</b>")
-                    continue
-
-                v, err = get_voucher(cmd)
-                if err:
-                    tg_send(chat_id, f"❌ {err}")
-                    continue
-
-                price = int(v["Giá"])
-                if balance < price:
-                    tg_send(chat_id, "❌ Không đủ số dư")
-                    continue
-
-                ok, reason = save_voucher_and_check(cookie, v)
-
-                if not ok:
-                    tg_send(chat_id, "❌ <b>Lưu mã thất bại</b>\n💸 Không trừ tiền")
-                    ws_log.append_row([
-                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        str(user_id), username, cmd, "FAIL", reason
-                    ])
-                    continue
-
-                new_bal = balance - price
-                ws_money.update_cell(row, 3, new_bal)
-                ws_log.append_row([
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    str(user_id), username, cmd, price, new_bal
-                ])
-
-                tg_hide(
-                    chat_id,
-                    "✅ <b>Thành công!</b>\n"
-                    f"💸 Đã trừ: <b>{price}</b>\n"
-                    f"💰 Số dư còn lại: <b>{new_bal}</b>"
-                )
-                continue
-
-        time.sleep(1)
-
-if __name__ == "__main__":
-    main()
+    return jsonify(ok=True)
