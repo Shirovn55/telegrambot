@@ -143,7 +143,7 @@ def build_main_keyboard():
     return {
         "keyboard": [
             ["📩 Gửi ID kích hoạt", "💳 Nạp tiền"],
-            ["💰 Số dư", "🎟️ Voucher"],
+            ["💰 Số dư", "🎟️ Lưu Voucher"],
             ["📜 Lịch sử nạp tiền"]
         ],
         "resize_keyboard": True
