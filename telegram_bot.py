@@ -191,8 +191,8 @@ def webhook():
         out.append(
             "\n📝 <b>HƯỚNG DẪN</b>\n"
             "💰 <b>Giá:</b> 1000đ / 1 lượt lưu\n"
-            "Cách 1️⃣: <code>/voucherxxx &lt;cookie&gt;</code>\n"
-            "Cách 2️⃣: Bấm <code>/voucherxxx</code> → gửi cookie"
+            "Cách 1️⃣: <code>/voucher100k &lt;cookie&gt;</code>\n"
+            "Cách 2️⃣: Bấm vào lệnh <code>/voucher100k</code> → gửi cookie"
         )
         tg_send(chat_id, "\n".join(out))
         return jsonify(ok=True)
