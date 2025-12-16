@@ -143,10 +143,12 @@ def build_main_keyboard():
     return {
         "keyboard": [
             ["📩 Gửi ID kích hoạt", "💳 Nạp tiền"],
-            ["/balance", "/voucherlist", "/topup_history"]
+            ["💰 Số dư", "🎟️ Voucher"],
+            ["📜 Lịch sử nạp tiền"]
         ],
         "resize_keyboard": True
     }
+
 
 def build_topup_admin_kb(user_id):
     return {
@@ -624,6 +626,10 @@ def handle_update(upd):
     # =================================================
     #                    /balance
     # =================================================
+    if text == "💰 Số dư":
+        tg_send(chat_id, f"💰 <b>Số dư:</b> <b>{balance}</b>")
+        return
+    
     if text == "/balance":
         tg_send(chat_id, f"💰 Số dư: <b>{balance}</b>")
         return
@@ -631,6 +637,10 @@ def handle_update(upd):
     # =================================================
     #                    /topup_history
     # =================================================
+    if text == "📜 Lịch sử nạp tiền":
+        tg_send(chat_id, topup_history_text(user_id))
+        return
+
     if text == "/topup_history":
         tg_send(chat_id, topup_history_text(user_id))
         return
@@ -638,30 +648,38 @@ def handle_update(upd):
     # =================================================
     #                    /voucherlist
     # =================================================
-    if text == "/voucherlist":
+
+    if text == "🎟️ Voucher":
+        # gọi lại logic y hệt /voucherlist
         rows = ws_voucher.get_all_records()
-        out = ["📦 <b>Voucher còn:</b>"]
+        out = ["🎁 <b>Voucher còn:</b>"]
+
         for r in rows:
             if r.get("Trạng Thái") == "Còn Mã":
-                out.append(f"- /{r.get('Tên Mã')} | {r.get('Giá')}")
+                out.append(f"- /{r.get('Tên Mã')} | 💰 <b>Giá:</b> {r.get('Giá')} VNĐ")
+
+
 
         combo_items, combo_err = get_vouchers_by_combo(COMBO1_KEY)
         if not combo_err:
             total_combo = sum(int(v.get("Giá", 0)) for v in combo_items)
-            out.append("\n🎁 <b>COMBO:</b>")
-            out.append(f"- /combo1 | {total_combo} | {len(combo_items)} mã")
-            
+            out.append("\n🎁 <b>COMBO1 : Mã 100k/0đ + Mã Hỏa Tốc</b>")
+            out.append(f"- /combo1 | 💰 <b>Giá:</b> {total_combo} VNĐ | 🎫 <b>{len(combo_items)}</b> mã")
+
+
+
         out.append(
             "\n📝 <b>HƯỚNG DẪN</b>\n"
             "Cách 1️⃣: <code>/voucher100k &lt;cookie&gt;</code>\n"
-            "Cách 2️⃣: Bấm <code>/voucher100k</code> →chờ bot rep → gửi cookie\n"
+            "Cách 2️⃣: Bấm <code>/voucher100k</code>  → gửi cookie\n"
             "\n🎁 <b>COMBO1 Mã 100k/0đ + Freeship Hỏa Tốc</b>\n"
             "Cách 1️⃣: <code>/combo1 &lt;cookie&gt;</code>\n"
-            "Cách 2️⃣: Bấm <code>/combo1</code> →chờ bot rep → gửi cookie"
+            "Cách 2️⃣: Bấm <code>/combo1</code> → gửi cookie"
         )
 
         tg_send(chat_id, "\n".join(out))
         return
+
 
     # =================================================
     #   CÁCH 2: bấm /voucherxxx hoặc /combo1 rồi gửi cookie
