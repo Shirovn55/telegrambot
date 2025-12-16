@@ -654,10 +654,10 @@ def handle_update(upd):
         out.append(
             "\n📝 <b>HƯỚNG DẪN</b>\n"
             "Cách 1️⃣: <code>/voucher100k &lt;cookie&gt;</code>\n"
-            "Cách 2️⃣: Bấm <code>/voucher100k</code> → gửi cookie\n"
-            "\n🎁 <b>COMBO1</b>\n"
+            "Cách 2️⃣: Bấm <code>/voucher100k</code> →chờ bot rep → gửi cookie\n"
+            "\n🎁 <b>COMBO1 Mã 100k/0đ + Freeship Hỏa Tốc</b>\n"
             "Cách 1️⃣: <code>/combo1 &lt;cookie&gt;</code>\n"
-            "Cách 2️⃣: Bấm <code>/combo1</code> →chờ bot rep -> gửi cookie"
+            "Cách 2️⃣: Bấm <code>/combo1</code> →chờ bot rep → gửi cookie"
         )
 
         tg_send(chat_id, "\n".join(out))
