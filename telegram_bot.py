@@ -143,7 +143,7 @@ def build_main_keyboard():
     return {
         "keyboard": [
             ["📩 Gửi ID kích hoạt", "💳 Nạp tiền"],
-            ["💰 Số dư", "🎟️ Lưu Voucher"],
+            ["💰 Số dư", "🎟️Lưu Voucher"],
             ["📜 Lịch sử nạp tiền"]
         ],
         "resize_keyboard": True
@@ -649,7 +649,7 @@ def handle_update(upd):
     #                    /voucherlist
     # =================================================
 
-    if text == "🎟️ Voucher":
+    if text == "🎟️Lưu Voucher":
         # gọi lại logic y hệt /voucherlist
         rows = ws_voucher.get_all_records()
         out = ["🎁 <b>Voucher còn:</b>"]
