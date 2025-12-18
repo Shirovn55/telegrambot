@@ -1202,32 +1202,44 @@ def _sort_obj(obj):
                 return [_sort_obj(x) for x in obj]
         return obj
 
+
 def _verify_casso_v2_signature(req, checksum_key: str) -> bool:
-        sig = req.headers.get("X-Casso-Signature") or req.headers.get("x-casso-signature") or ""
+        sig = (
+                req.headers.get("X-Casso-Signature")
+                or req.headers.get("x-casso-signature")
+                or ""
+        )
         if not sig or not checksum_key:
                 return False
 
-        # sig: "t=1734924830020,v1=...."
+        # sig dạng: t=1734924830020,v1=xxxx
         parts = {}
         for item in sig.split(","):
-                item = item.strip()
                 if "=" in item:
                         k, v = item.split("=", 1)
                         parts[k.strip()] = v.strip()
 
-        t = parts.get("t", "")
-        v1 = parts.get("v1", "")
+        t = parts.get("t")
+        v1 = parts.get("v1")
         if not t or not v1:
                 return False
 
         raw = req.get_json(force=True, silent=True) or {}
-        data_obj = raw.get("data", {})
+        sorted_body = _sort_obj(raw)
 
-        sorted_data = _sort_obj(data_obj)
-        json_str = json.dumps(sorted_data, ensure_ascii=False, separators=(",", ":"))
+        body_str = json.dumps(
+                sorted_body,
+                ensure_ascii=False,
+                separators=(",", ":")
+        )
 
-        payload = f"{t}.{json_str}".encode("utf-8")
-        mac = hmac.new(checksum_key.encode("utf-8"), payload, hashlib.sha512).hexdigest()
+        payload = f"{t}.{body_str}".encode("utf-8")
+
+        mac = hmac.new(
+                checksum_key.encode("utf-8"),
+                payload,
+                hashlib.sha512
+        ).hexdigest()
 
         return hmac.compare_digest(mac, v1)
 
@@ -1239,14 +1251,14 @@ def webhook_casso():
 
                 data = request.get_json(force=True, silent=True) or {}
 
-                # ✅ Verify theo chuẩn Webhook V2
+                # ✅ VERIFY CASSO WEBHOOK V2
                 if CASSO_WEBHOOK_SECRET:
                         if not _verify_casso_v2_signature(request, CASSO_WEBHOOK_SECRET):
                                 print("[CASSO] ❌ INVALID_SIGNATURE")
                                 return "INVALID_SIGNATURE", 403
 
-                # data.get("data") có thể là list hoặc dict
                 txs = data.get("data")
+
                 if isinstance(txs, dict):
                         transactions = [txs]
                 elif isinstance(txs, list):
@@ -1258,7 +1270,13 @@ def webhook_casso():
                         if not isinstance(tx, dict):
                                 continue
 
-                        tx_id = str(tx.get("id") or tx.get("tid") or tx.get("transaction_id") or "").strip()
+                        tx_id = str(
+                                tx.get("id")
+                                or tx.get("tid")
+                                or tx.get("transaction_id")
+                                or ""
+                        ).strip()
+
                         amount = int(tx.get("amount") or 0)
                         description = str(tx.get("description") or "").strip()
 
@@ -1299,8 +1317,6 @@ def webhook_casso():
         except Exception as e:
                 print("[CASSO] ❌ ERROR:", repr(e))
                 return "ERROR", 500
-
-
 
 
 
