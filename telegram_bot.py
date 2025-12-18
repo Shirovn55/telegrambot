@@ -251,6 +251,36 @@ def log_row(user_id, username, action, value="", note=""):
 # =========================================================
 # USER / MONEY UTIL
 # =========================================================
+def update_topup_note(user_id, amount, tx_id="", description=""):
+    """
+    Ghi lịch sử nạp vào cột 'ghi Chú' (cột F) tab Thanh Toan
+    """
+    if not SHEET_READY:
+        return
+
+    try:
+        row = get_user_row(user_id)
+        if not row:
+            return
+
+        NOTE_COL = 6  # cột F - ghi Chú
+
+        old_note = ws_money.cell(row, NOTE_COL).value or ""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        new_line = f"{now} | +{amount:,}đ | TX:{tx_id}"
+
+        if old_note:
+            new_note = new_line + "\n" + old_note
+        else:
+            new_note = new_line
+
+        ws_money.update_cell(row, NOTE_COL, new_note)
+
+    except Exception as e:
+        print("[TOPUP_NOTE_ERROR]", e)
+
+
 def get_user_row(user_id):
     if not SHEET_READY:
         return None
@@ -822,6 +852,7 @@ def handle_admin_amount_input(admin_id, text):
 
     ensure_user_exists(uid, "")
     new_bal = add_balance(uid, amount)
+    update_topup_note(uid, amount, tx_id="BILL", description="Admin duyệt bill")
 
     if fu:
         SEEN_BILL_UNIQUE_IDS.add(fu)
@@ -869,6 +900,7 @@ def handle_admin_add_balance(user_id, text):
 
     ensure_user_exists(uid, "")
     new_bal = add_balance(uid, amount)
+    update_topup_note(uid, amount, tx_id="CMD", description="Admin + tiền")
 
     log_row(uid, "", "TOPUP_CMD", str(amount), "Admin cmd")
 
@@ -1220,6 +1252,8 @@ def webhook_casso():
         user_id = int(m.group(1))
         ensure_user_exists(user_id, "")
         new_bal = add_balance(user_id, amount)
+        update_topup_note(user_id, amount, tx_id=tx_id, description=desc)
+
 
         log_row(user_id, "", "TOPUP_AUTO", amount, f"TX:{tx_id}")
 
