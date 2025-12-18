@@ -1194,67 +1194,97 @@ def home():
 @app.route("/webhook-casso", methods=["POST"])
 def webhook_casso():
     try:
+        # ===============================
+        # 1. LẤY DATA JSON
+        # ===============================
         data = request.get_json(force=True, silent=True) or {}
-        print("💳 CASSO WEBHOOK DATA:", data)
 
-        # ===== CHO PHÉP CALL TEST TỪ CASSO =====
-        secret = request.headers.get("X-Casso-Secret", "")
+        if DEBUG:
+            print("[CASSO] RAW DATA:", data)
+
+        # ===============================
+        # 2. CHECK SECRET (NẾU CÓ)
+        # ===============================
+        secret = data.get("secure_token", "")
         if CASSO_WEBHOOK_SECRET and secret != CASSO_WEBHOOK_SECRET:
+            print("[CASSO] ❌ INVALID SECRET:", secret)
             return "INVALID_SECRET", 403
 
-        # ===== TEST CALL KHÔNG CÓ AMOUNT → OK =====
-        if "amount" not in data:
+        # ===============================
+        # 3. LẤY DANH SÁCH GIAO DỊCH
+        # ===============================
+        transactions = data.get("data", [])
+        if not isinstance(transactions, list):
             return "OK", 200
 
-        tx_id = str(
-            data.get("id")
-            or data.get("transaction_id")
-            or data.get("reference")
-            or ""
-        )
+        # ===============================
+        # 4. DUYỆT TỪNG GIAO DỊCH
+        # ===============================
+        for tx in transactions:
+            tx_id = str(
+                tx.get("id")
+                or tx.get("tid")
+                or tx.get("transaction_id")
+                or ""
+            ).strip()
 
-        amount = int(float(data.get("amount", 0)))
-        desc = str(data.get("description", "")).strip()
+            amount = int(tx.get("amount", 0))
+            description = (tx.get("description") or "").strip()
 
-        if not tx_id or amount <= 0:
-            return "IGNORE", 200
+            if not tx_id or amount <= 0:
+                continue
 
-        if tx_id in SEEN_CASSO_TX_IDS:
-            return "DUPLICATE", 200
+            # ---- chống cộng trùng ----
+            if tx_id in SEEN_CASSO_TX_IDS:
+                continue
+            SEEN_CASSO_TX_IDS.add(tx_id)
 
-        parts = desc.upper().split()
-        if len(parts) < 2 or parts[0] != "NAP" or not parts[1].isdigit():
-            return "IGNORE", 200
+            if DEBUG:
+                print(f"[CASSO] TX {tx_id} | +{amount} | {description}")
 
-        user_id = int(parts[1])
+            # ===============================
+            # 5. PARSE USER ID (NAP <id>)
+            # ===============================
+            m = re.search(r"\bNAP\s+(\d+)\b", description, re.IGNORECASE)
+            if not m:
+                continue
 
-        ensure_user_exists(user_id, "")
-        new_bal = add_balance(user_id, amount)
+            user_id = int(m.group(1))
 
-        log_row(
-            user_id,
-            "",
-            "TOPUP_AUTO",
-            str(amount),
-            f"CASSO:{tx_id}"
-        )
+            # ===============================
+            # 6. CỘNG TIỀN (ĐÚNG HÀM)
+            # ===============================
+            ensure_user_exists(user_id, "")
+            new_bal = add_balance(user_id, amount)
 
-        SEEN_CASSO_TX_IDS.add(tx_id)
-
-        tg_send(
-            user_id,
-            (
-                "✅ <b>NẠP TIỀN THÀNH CÔNG</b>\n"
-                f"💰 +{amount}\n"
-                f"💼 Số dư: <b>{new_bal}</b>"
+            # ===============================
+            # 7. LOG GOOGLE SHEET
+            # ===============================
+            log_row(
+                user_id,
+                "",
+                "TOPUP_AUTO",
+                str(amount),
+                f"TX:{tx_id} | {description}"
             )
-        )
+
+            # ===============================
+            # 8. NHẮN TELEGRAM CHO USER
+            # ===============================
+            tg_send(
+                user_id,
+                f"💰 <b>NẠP TIỀN THÀNH CÔNG</b>\n\n"
+                f"➕ Số tiền: <b>{amount:,}đ</b>\n"
+                f"💼 Số dư mới: <b>{new_bal:,}đ</b>\n"
+                f"🧾 Mã GD: <code>{tx_id}</code>"
+            )
 
         return "OK", 200
 
     except Exception as e:
-        print("❌ CASSO ERROR:", e)
+        print("[CASSO] ❌ ERROR:", e)
         return "ERROR", 500
+
 
 
 
