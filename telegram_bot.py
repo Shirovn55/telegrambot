@@ -1205,25 +1205,31 @@ def webhook_casso():
             print("[CASSO] RAW DATA:", data)
 
         # ===============================
-        # 2. CHECK SECRET (HỖ TRỢ CASSO V2)
+        # 2. VERIFY CASSO WEBHOOK SIGNATURE (V2 - CHUẨN DOCS)
         # ===============================
-        header_secret = (
-                request.headers.get("X-Casso-Secret")
-                or request.headers.get("x-casso-secret")
-                or request.headers.get("X-Casso-Webhook-Secret")
-                or request.headers.get("x-casso-webhook-secret")
-                or request.headers.get("X-Casso-Signature")
+        signature = (
+                request.headers.get("X-Casso-Signature")
                 or request.headers.get("x-casso-signature")
                 or ""
         )
 
-        if DEBUG:
-                print("[CASSO] HEADERS:", dict(request.headers))
-                print("[CASSO] SECRET RECEIVED:", header_secret)
+        raw_body = request.get_data(as_text=True)
 
-        if CASSO_WEBHOOK_SECRET and header_secret != CASSO_WEBHOOK_SECRET:
-                print("[CASSO] ❌ INVALID SECRET:", header_secret)
-                return "INVALID_SECRET", 403
+        if DEBUG:
+                print("[CASSO] RAW BODY:", raw_body)
+                print("[CASSO] SIGNATURE HEADER:", signature)
+
+        if CASSO_WEBHOOK_SECRET:
+                expected_signature = hmac.new(
+                        CASSO_WEBHOOK_SECRET.encode("utf-8"),
+                        raw_body.encode("utf-8"),
+                        hashlib.sha256
+                ).hexdigest()
+
+                if not hmac.compare_digest(signature, expected_signature):
+                        print("[CASSO] ❌ INVALID SIGNATURE")
+                        print("[CASSO] EXPECTED:", expected_signature)
+                        return "INVALID_SECRET", 403
 
 
         # ===============================
