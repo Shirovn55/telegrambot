@@ -1205,16 +1205,24 @@ def webhook_casso():
             print("[CASSO] RAW DATA:", data)
 
         # ===============================
-        # 2. CHECK SECRET (ĐÚNG CHUẨN CASSO)
+        # 2. CHECK SECRET (HỖ TRỢ CASSO V2)
         # ===============================
         header_secret = (
                 request.headers.get("X-Casso-Secret")
                 or request.headers.get("x-casso-secret")
+                or request.headers.get("X-Casso-Webhook-Secret")
+                or request.headers.get("x-casso-webhook-secret")
+                or request.headers.get("X-Casso-Signature")
+                or request.headers.get("x-casso-signature")
                 or ""
         )
 
+        if DEBUG:
+                print("[CASSO] HEADERS:", dict(request.headers))
+                print("[CASSO] SECRET RECEIVED:", header_secret)
+
         if CASSO_WEBHOOK_SECRET and header_secret != CASSO_WEBHOOK_SECRET:
-                print("[CASSO] ❌ INVALID SECRET HEADER:", header_secret)
+                print("[CASSO] ❌ INVALID SECRET:", header_secret)
                 return "INVALID_SECRET", 403
 
 
