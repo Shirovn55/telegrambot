@@ -50,6 +50,13 @@ BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 QR_URL   = "https://img.vietqr.io/image/TPB-0819555000-compact.png"
 SAVE_URL = "https://shopee.vn/api/v2/voucher_wallet/save_vouchers"
+ws_nap_tien = None
+
+try:
+    ws_nap_tien = sh.worksheet("Nap Tien")
+except Exception as e:
+    print("❌ Không tìm thấy tab Nap Tien:", e)
+
 # =========================================================
 # VIETQR (AUTO TOPUP)
 # =========================================================
@@ -251,34 +258,6 @@ def log_row(user_id, username, action, value="", note=""):
 # =========================================================
 # USER / MONEY UTIL
 # =========================================================
-def update_topup_note(user_id, amount, tx_id="", description=""):
-    """
-    Ghi lịch sử nạp vào cột 'ghi Chú' (cột F) tab Thanh Toan
-    """
-    if not SHEET_READY:
-        return
-
-    try:
-        row = get_user_row(user_id)
-        if not row:
-            return
-
-        NOTE_COL = 6  # cột F - ghi Chú
-
-        old_note = ws_money.cell(row, NOTE_COL).value or ""
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        new_line = f"{now} | +{amount:,}đ | TX:{tx_id}"
-
-        if old_note:
-            new_note = new_line + "\n" + old_note
-        else:
-            new_note = new_line
-
-        ws_money.update_cell(row, NOTE_COL, new_note)
-
-    except Exception as e:
-        print("[TOPUP_NOTE_ERROR]", e)
 
 
 def get_user_row(user_id):
@@ -674,6 +653,54 @@ def topup_history_text(user_id):
 
     return "\n".join(out)
 
+
+def log_nap_tien(user_id, username, amount, tx_id="", note=""):
+    """
+    Ghi 1 dòng lịch sử nạp tiền vào tab 'Nap Tien'
+    """
+    if not SHEET_READY or ws_nap_tien is None:
+        return
+
+    try:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        ws_nap_tien.append_row([
+            now,
+            str(user_id),
+            username,
+            int(amount),
+            tx_id,
+            note
+        ])
+
+    except Exception as e:
+        print("[NAP_TIEN_LOG_ERROR]", e)
+def topup_history_text(user_id, limit=10):
+    if not SHEET_READY or ws_nap_tien is None:
+        return "❌ Hệ thống lịch sử nạp tiền đang lỗi."
+
+    try:
+        rows = ws_nap_tien.get_all_records()
+    except Exception:
+        return "❌ Không đọc được dữ liệu nạp tiền."
+
+    history = [
+        r for r in rows
+        if str(r.get("user_id")) == str(user_id)
+    ]
+
+    if not history:
+        return "📜 <b>Lịch sử nạp tiền</b>\nChưa có giao dịch nào."
+
+    history = history[-limit:]
+
+    out = ["📜 <b>Lịch sử nạp tiền (mới nhất)</b>"]
+    for r in reversed(history):
+        out.append(
+            f"- {r.get('time')} | +{int(r.get('amount')):,}đ | {r.get('note')}"
+        )
+
+    return "\n".join(out)
 
 
 # =========================================================
@@ -1259,9 +1286,14 @@ def webhook_casso():
         user_id = int(m.group(1))
         ensure_user_exists(user_id, "")
         new_bal = add_balance(user_id, amount)
-        update_topup_note(user_id, amount, tx_id=tx_id, description=desc)
-
-
+        # ===== GHI LỊCH SỬ NẠP TIỀN =====
+        log_nap_tien(
+                user_id=user_id,
+                username="",
+                amount=amount,
+                tx_id=tx_id,
+                note="AUTO CASSO"
+        )
         log_row(user_id, "", "TOPUP_AUTO", amount, f"TX:{tx_id}")
 
         tg_send(
