@@ -497,21 +497,22 @@ def build_voucher_info_text():
         "  💰 2.000 VNĐ | 🎫 2 mã\n\n"
         "👇 <b>BẤM NÚT BÊN DƯỚI ĐỂ MUA</b>"
     )
-def build_voucher_inline_keyboard():
+def build_quick_voucher_keyboard():
     return {
         "inline_keyboard": [
             [
                 {"text": "💸 Mã 100k 0đ", "callback_data": "BUY:voucher100k"},
-                {"text": "💸 Mã 50% Max 100k ", "callback_data": "BUY:voucher50max100"},
+                {"text": "💸 Mã 50% Max 100k", "callback_data": "BUY:voucher50max100"},
             ],
             [
                 {"text": "🚀 Freeship Hỏa Tốc", "callback_data": "BUY:voucherHoaToc"},
             ],
             [
-                {"text": "🎁  COMBO1 – Mã 100k + Ship HT 🔥", "callback_data": "BUY:combo1"}
+                {"text": "🎁 COMBO1 | Mã 100k + Ship HT 🔥", "callback_data": "BUY:combo1"}
             ]
         ]
     }
+
 
 def build_voucher_list_text():
     """
@@ -989,7 +990,8 @@ def handle_update(update):
         tg_send(
             chat_id,
             build_voucher_info_text(),
-            build_voucher_inline_keyboard()
+            build_quick_voucher_keyboard()
+
         )
         return
 
@@ -1234,7 +1236,7 @@ def webhook_casso():
             if not tx_id or amount <= 0:
                 continue
 
-            # ---- chống cộng trùng ----
+            # ---- CHỐNG CỘNG TRÙNG ----
             if tx_id in SEEN_CASSO_TX_IDS:
                 continue
             SEEN_CASSO_TX_IDS.add(tx_id)
@@ -1252,13 +1254,13 @@ def webhook_casso():
             user_id = int(m.group(1))
 
             # ===============================
-            # 6. CỘNG TIỀN (ĐÚNG HÀM)
+            # 6. CỘNG TIỀN (HÀM ĐÚNG)
             # ===============================
             ensure_user_exists(user_id, "")
             new_bal = add_balance(user_id, amount)
 
             # ===============================
-            # 7. LOG GOOGLE SHEET
+            # 7. GHI LOG GOOGLE SHEET
             # ===============================
             log_row(
                 user_id,
