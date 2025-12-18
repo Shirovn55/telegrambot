@@ -1188,135 +1188,166 @@ def home():
         return "Bot running, Sheet ERROR", 500
     return "Bot is running", 200
 
-
-# =========================================================
-# CASSO WEBHOOK — AUTO TOPUP
-# =========================================================
 import hmac
 import hashlib
 
-def _sort_obj(obj):
-        if isinstance(obj, dict):
-                return {k: _sort_obj(obj[k]) for k in sorted(obj.keys())}
-        if isinstance(obj, list):
-                return [_sort_obj(x) for x in obj]
-        return obj
+def _canonicalize(obj):
+    """
+    Canonical JSON object:
+    - sort key dict theo alphabet (đệ quy)
+    - list giữ nguyên thứ tự phần tử, nhưng canonicalize từng phần tử
+    """
+    if isinstance(obj, dict):
+        return {k: _canonicalize(obj[k]) for k in sorted(obj.keys())}
+    if isinstance(obj, list):
+        return [_canonicalize(x) for x in obj]
+    return obj
 
 
-def _verify_casso_v2_signature(req, checksum_key: str) -> bool:
-        sig = (
-                req.headers.get("X-Casso-Signature")
-                or req.headers.get("x-casso-signature")
-                or ""
-        )
-        if not sig or not checksum_key:
-                return False
+def _json_compact(obj) -> str:
+    """
+    JSON không khoảng trắng, giữ unicode (giống JSON.stringify về mặt hiển thị unicode)
+    """
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
 
-        # sig dạng: t=1734924830020,v1=xxxx
-        parts = {}
-        for item in sig.split(","):
-                if "=" in item:
-                        k, v = item.split("=", 1)
-                        parts[k.strip()] = v.strip()
 
-        t = parts.get("t")
-        v1 = parts.get("v1")
-        if not t or not v1:
-                return False
+def _parse_signature_header(sig_header: str):
+    """
+    X-Casso-Signature: "t=...,v1=..."
+    """
+    parts = {}
+    for item in (sig_header or "").split(","):
+        item = item.strip()
+        if "=" in item:
+            k, v = item.split("=", 1)
+            parts[k.strip()] = v.strip()
+    t = parts.get("t", "")
+    v1 = parts.get("v1", "")
+    return t, v1
 
-        raw = req.get_json(force=True, silent=True) or {}
-        sorted_body = _sort_obj(raw)
 
-        body_str = json.dumps(
-                sorted_body,
-                ensure_ascii=False,
-                separators=(",", ":")
-        )
+def _hmac_sha512_hex(key: str, msg_bytes: bytes) -> str:
+    return hmac.new(key.encode("utf-8"), msg_bytes, hashlib.sha512).hexdigest()
 
-        payload = f"{t}.{body_str}".encode("utf-8")
 
-        mac = hmac.new(
-                checksum_key.encode("utf-8"),
-                payload,
-                hashlib.sha512
-        ).hexdigest()
+def _verify_casso_webhook_v2(req, checksum_key: str) -> bool:
+    """
+    Verify Webhook V2 theo Casso:
+    payload = f"{t}.{json_canonical}"
+    mac = HMAC_SHA512(checksum_key, payload)
 
-        return hmac.compare_digest(mac, v1)
+    Thực tế Casso có thể ký theo:
+    - toàn bộ body: {"error":0,"data":{...}}
+    HOẶC
+    - chỉ data: {...}
+    => để chắc chắn pass, mình verify cả 2 kiểu.
+    """
+    sig = req.headers.get("X-Casso-Signature") or req.headers.get("x-casso-signature") or ""
+    if not sig or not checksum_key:
+        return False
+
+    t, v1 = _parse_signature_header(sig)
+    if not t or not v1:
+        return False
+
+    raw = req.get_json(force=True, silent=True) or {}
+
+    # 1) Candidate A: ký trên toàn bộ body
+    body_a = _canonicalize(raw)
+    json_a = _json_compact(body_a)
+    payload_a = f"{t}.{json_a}".encode("utf-8")
+    mac_a = _hmac_sha512_hex(checksum_key, payload_a)
+
+    if hmac.compare_digest(mac_a, v1):
+        return True
+
+    # 2) Candidate B: ký trên riêng trường "data"
+    data_only = raw.get("data", None)
+    body_b = _canonicalize(data_only)
+    json_b = _json_compact(body_b)
+    payload_b = f"{t}.{json_b}".encode("utf-8")
+    mac_b = _hmac_sha512_hex(checksum_key, payload_b)
+
+    return hmac.compare_digest(mac_b, v1)
+
 
 @app.route("/webhook-casso", methods=["POST", "GET"])
 def webhook_casso():
-        try:
-                if request.method == "GET":
-                        return "OK", 200
+    try:
+        # Cho Casso gọi thử/verify URL
+        if request.method == "GET":
+            return "OK", 200
 
-                data = request.get_json(force=True, silent=True) or {}
+        data = request.get_json(force=True, silent=True) or {}
 
-                # ✅ VERIFY CASSO WEBHOOK V2
-                if CASSO_WEBHOOK_SECRET:
-                        if not _verify_casso_v2_signature(request, CASSO_WEBHOOK_SECRET):
-                                print("[CASSO] ❌ INVALID_SIGNATURE")
-                                return "INVALID_SIGNATURE", 403
+        if DEBUG:
+            print("[CASSO] HEADERS:", dict(request.headers))
+            print("[CASSO] BODY:", data)
 
-                txs = data.get("data")
+        # ✅ VERIFY SIGNATURE V2
+        if CASSO_WEBHOOK_SECRET:
+            if not _verify_casso_webhook_v2(request, CASSO_WEBHOOK_SECRET):
+                print("[CASSO] ❌ INVALID_SIGNATURE")
+                return "INVALID_SIGNATURE", 403
 
-                if isinstance(txs, dict):
-                        transactions = [txs]
-                elif isinstance(txs, list):
-                        transactions = txs
-                else:
-                        transactions = []
+        # V2 docs: data là OBJECT giao dịch
+        # Nhưng để tương thích, nếu data là list/dict đều xử lý
+        txs = data.get("data")
+        if isinstance(txs, dict):
+            transactions = [txs]
+        elif isinstance(txs, list):
+            transactions = txs
+        else:
+            transactions = []
 
-                for tx in transactions:
-                        if not isinstance(tx, dict):
-                                continue
+        for tx in transactions:
+            if not isinstance(tx, dict):
+                continue
 
-                        tx_id = str(
-                                tx.get("id")
-                                or tx.get("tid")
-                                or tx.get("transaction_id")
-                                or ""
-                        ).strip()
+            tx_id = str(tx.get("id") or tx.get("tid") or tx.get("transaction_id") or "").strip()
+            amount = int(tx.get("amount") or 0)
+            description = str(tx.get("description") or "").strip()
 
-                        amount = int(tx.get("amount") or 0)
-                        description = str(tx.get("description") or "").strip()
+            if not tx_id or amount <= 0:
+                continue
 
-                        if not tx_id or amount <= 0:
-                                continue
+            # Chống cộng trùng
+            if tx_id in SEEN_CASSO_TX_IDS:
+                continue
+            SEEN_CASSO_TX_IDS.add(tx_id)
 
-                        if tx_id in SEEN_CASSO_TX_IDS:
-                                continue
-                        SEEN_CASSO_TX_IDS.add(tx_id)
+            # Parse nội dung: NAP <user_id>
+            m = re.search(r"\bNAP\s+(\d+)\b", description, re.IGNORECASE)
+            if not m:
+                continue
 
-                        m = re.search(r"\bNAP\s+(\d+)\b", description, re.IGNORECASE)
-                        if not m:
-                                continue
+            topup_user_id = int(m.group(1))
 
-                        user_id = int(m.group(1))
+            ensure_user_exists(topup_user_id, "")
+            new_bal = add_balance(topup_user_id, amount)
 
-                        ensure_user_exists(user_id, "")
-                        new_bal = add_balance(user_id, amount)
+            log_row(
+                topup_user_id,
+                "",
+                "TOPUP_AUTO",
+                str(amount),
+                f"TX:{tx_id} | {description}"
+            )
 
-                        log_row(
-                                user_id,
-                                "",
-                                "TOPUP_AUTO",
-                                str(amount),
-                                f"TX:{tx_id} | {description}"
-                        )
+            tg_send(
+                topup_user_id,
+                "💰 <b>NẠP TIỀN THÀNH CÔNG</b>\n\n"
+                f"➕ Số tiền: <b>{amount:,}đ</b>\n"
+                f"💼 Số dư mới: <b>{new_bal:,}đ</b>\n"
+                f"🧾 Mã GD: <code>{tx_id}</code>"
+            )
 
-                        tg_send(
-                                user_id,
-                                f"💰 <b>NẠP TIỀN THÀNH CÔNG</b>\n\n"
-                                f"➕ Số tiền: <b>{amount:,}đ</b>\n"
-                                f"💼 Số dư mới: <b>{new_bal:,}đ</b>\n"
-                                f"🧾 Mã GD: <code>{tx_id}</code>"
-                        )
+        return "OK", 200
 
-                return "OK", 200
+    except Exception as e:
+        print("[CASSO] ❌ ERROR:", repr(e))
+        return "ERROR", 500
 
-        except Exception as e:
-                print("[CASSO] ❌ ERROR:", repr(e))
-                return "ERROR", 500
 
 
 
