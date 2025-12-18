@@ -652,21 +652,28 @@ def topup_history_text(user_id):
 
     logs = []
     for r in rows:
-        uid = str(r.get("user_id", ""))
-        act = str(r.get("action", ""))
-        if uid == str(user_id) and act in ("TOPUP", "TOPUP_CMD"):
+        uid = str(r.get("Tele ID", "") or r.get("user_id", ""))
+        action = str(r.get("action", "") or r.get("Hành động", ""))
+
+        if uid == str(user_id) and action in ("TOPUP", "TOPUP_CMD", "TOPUP_AUTO"):
             logs.append(r)
 
-    logs = logs[-10:]
+    logs = logs[-10:]  # 10 giao dịch gần nhất
+
     if not logs:
         return "📜 <b>Lịch sử nạp tiền</b>\nChưa có giao dịch nào."
 
     out = ["📜 <b>Lịch sử nạp tiền (10 gần nhất)</b>"]
+
     for r in logs:
-        out.append(
-            f"- {r.get('time')} | +{r.get('value')} | {r.get('note')}"
-        )
+        time_ = r.get("time") or r.get("Thời gian") or ""
+        value = r.get("value") or r.get("Số tiền") or ""
+        note  = r.get("note") or r.get("Ghi chú") or ""
+
+        out.append(f"- {time_} | +{value} | {note}")
+
     return "\n".join(out)
+
 
 
 # =========================================================
