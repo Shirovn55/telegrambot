@@ -1191,73 +1191,106 @@ def home():
     return "Bot is running", 200
 
 # =========================================================
-
 def verify_casso_v2_signature_raw(raw_body: bytes, headers, checksum_key: str) -> bool:
     """
-    Verify chữ ký Casso Webhook V2
-    - Dùng RAW BODY (bytes)
-    - KHÔNG json.dumps
-    - KHÔNG request.get_json
+    Verify chữ ký Casso Webhook V2 - ĐÃ FIX
+    Format header: X-Casso-Signature: t=1734526800000,v1=abc123def456...
+    Payload: timestamp + "." + raw_body
     """
     sig = headers.get("X-Casso-Signature") or headers.get("x-casso-signature")
     if not sig or not checksum_key:
+        print(f"[CASSO] ❌ Missing signature or key. Sig: {sig}, Key: {checksum_key[:10]}...")
         return False
 
-    # Header dạng: t=xxxxx,v1=yyyyy
+    # Parse header: t=1734526800000,v1=abc123def456...
     parts = {}
     for item in sig.split(","):
         if "=" in item:
             k, v = item.split("=", 1)
             parts[k.strip()] = v.strip()
 
-    t = parts.get("t")
-    v1 = parts.get("v1")
-    if not t or not v1:
+    timestamp = parts.get("t")
+    signature = parts.get("v1")
+    
+    if not timestamp or not signature:
+        print(f"[CASSO] ❌ Invalid signature format: {sig}")
         return False
 
-    # Payload = "{t}.{raw_body}"
-    payload = f"{t}.".encode("utf-8") + raw_body
+    try:
+        # Payload = timestamp + "." + raw_body (bytes)
+        payload = timestamp.encode("utf-8") + b"." + raw_body
+        
+        # Tạo HMAC SHA512
+        expected_signature = hmac.new(
+            checksum_key.encode("utf-8"),
+            payload,
+            hashlib.sha512
+        ).hexdigest()
 
-    mac = hmac.new(
-        checksum_key.encode("utf-8"),
-        payload,
-        hashlib.sha512
-    ).hexdigest()
-
-    return hmac.compare_digest(mac, v1)
-
+        # So sánh an toàn
+        is_valid = hmac.compare_digest(expected_signature, signature)
+        
+        if not is_valid:
+            print(f"[CASSO] ❌ Signature mismatch!")
+            print(f"  Timestamp: {timestamp}")
+            print(f"  Received:  {signature[:20]}...")
+            print(f"  Expected:  {expected_signature[:20]}...")
+            print(f"  Body size: {len(raw_body)} bytes")
+            print(f"  Body preview: {raw_body[:100] if len(raw_body) > 100 else raw_body}")
+            
+        return is_valid
+        
+    except Exception as e:
+        print(f"[CASSO] ❌ Verification error: {e}")
+        return False
 @app.route("/webhook-casso", methods=["POST", "GET"])
 def webhook_casso():
     # Casso dùng GET để test endpoint
     if request.method == "GET":
+        print("[CASSO] ✅ GET request - Endpoint is live")
         return "OK", 200
 
     try:
         # 🔥 LẤY RAW BODY 1 LẦN DUY NHẤT
         raw_body = request.get_data()
+        
+        # Debug info
+        print(f"\n[CASSO] 📦 New webhook received")
+        print(f"  Content-Type: {request.content_type}")
+        print(f"  Headers: {dict(request.headers)}")
+        print(f"  Body size: {len(raw_body)} bytes")
+        print(f"  Body preview: {raw_body[:200] if len(raw_body) > 200 else raw_body}")
 
         # =========================
         # ✅ VERIFY CHỮ KÝ WEBHOOK V2
         # =========================
         if CASSO_WEBHOOK_SECRET:
+            print(f"[CASSO] 🔑 Using secret: {CASSO_WEBHOOK_SECRET[:10]}...")
+            
             if not verify_casso_v2_signature_raw(
                 raw_body,
                 request.headers,
                 CASSO_WEBHOOK_SECRET
             ):
-                print("[CASSO] ❌ INVALID_SIGNATURE")
+                print("[CASSO] ❌ INVALID_SIGNATURE - Rejected")
                 return "INVALID_SIGNATURE", 403
+            else:
+                print("[CASSO] ✅ Signature verified successfully")
+        else:
+            print("[CASSO] ⚠️ No webhook secret configured - skipping verification")
 
         # =========================
         # 👉 PARSE JSON SAU KHI VERIFY
         # =========================
         try:
             data = json.loads(raw_body.decode("utf-8"))
+            print(f"[CASSO] 📊 Parsed JSON: {json.dumps(data, ensure_ascii=False)[:200]}...")
         except Exception as e:
             print("[CASSO] ❌ JSON ERROR:", e)
             return "BAD_REQUEST", 400
 
         txs = data.get("data")
+        print(f"[CASSO] 📈 Transactions data type: {type(txs)}")
 
         # data có thể là dict hoặc list
         if isinstance(txs, dict):
@@ -1266,35 +1299,46 @@ def webhook_casso():
             transactions = txs
         else:
             transactions = []
+            print(f"[CASSO] ⚠️ No transactions found in data")
 
-        for tx in transactions:
+        print(f"[CASSO] 🔄 Processing {len(transactions)} transactions")
+
+        for idx, tx in enumerate(transactions):
             if not isinstance(tx, dict):
+                print(f"[CASSO] ⚠️ Transaction {idx} is not dict: {type(tx)}")
                 continue
 
             tx_id = str(
-                tx.get("id")
-                or tx.get("transaction_id")
-                or tx.get("tid")
-                or ""
+                tx.get("id") or 
+                tx.get("transaction_id") or 
+                tx.get("tid") or 
+                ""
             ).strip()
 
             amount = int(tx.get("amount") or 0)
             description = str(tx.get("description") or "").strip()
+            
+            print(f"[CASSO] 💰 TX {idx}: ID={tx_id}, Amount={amount}, Desc='{description}'")
 
             if not tx_id or amount <= 0:
+                print(f"[CASSO] ⚠️ Skipping invalid transaction")
                 continue
 
             # Chống cộng tiền trùng
             if tx_id in SEEN_CASSO_TX_IDS:
+                print(f"[CASSO] ⚠️ Duplicate transaction ID: {tx_id}")
                 continue
+                
             SEEN_CASSO_TX_IDS.add(tx_id)
 
             # Parse nội dung: NAP <user_id>
             m = re.search(r"\bNAP\s+(\d+)\b", description, re.IGNORECASE)
             if not m:
+                print(f"[CASSO] ⚠️ No NAP pattern found in: '{description}'")
                 continue
 
             user_id = int(m.group(1))
+            print(f"[CASSO] 👤 Found user ID: {user_id}")
 
             # =========================
             # 👉 CỘNG TIỀN
@@ -1319,11 +1363,16 @@ def webhook_casso():
                     f"🧾 Mã GD: <code>{tx_id}</code>"
                 )
             )
+            
+            print(f"[CASSO] ✅ Processed TX {tx_id} for user {user_id}")
 
+        print("[CASSO] ✅ All transactions processed")
         return "OK", 200
 
     except Exception as e:
         print("[CASSO] ❌ ERROR:", repr(e))
+        import traceback
+        traceback.print_exc()
         return "ERROR", 500
 
 
