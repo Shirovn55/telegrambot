@@ -654,9 +654,9 @@ def topup_history_text(user_id):
     return "\n".join(out)
 
 
-def log_nap_tien(user_id, username, amount, tx_id="", note=""):
+def log_nap_tien(user_id, username, amount, loai="AUTO", tx_id="", note=""):
     """
-    Ghi 1 dòng lịch sử nạp tiền vào tab 'Nap Tien'
+    Ghi 1 dòng lịch sử nạp tiền vào tab 'Nap tien'
     """
     if not SHEET_READY or ws_nap_tien is None:
         return
@@ -665,16 +665,17 @@ def log_nap_tien(user_id, username, amount, tx_id="", note=""):
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         ws_nap_tien.append_row([
-            now,
-            str(user_id),
-            username,
-            int(amount),
-            tx_id,
-            note
+            now,               # time
+            str(user_id),       # Tele ID
+            username,           # username
+            int(amount),        # số tiền
+            loai,               # loại
+            tx_id,              # tx_id
+            note                # nội dung
         ])
-
     except Exception as e:
         print("[NAP_TIEN_LOG_ERROR]", e)
+
 def topup_history_text(user_id, limit=10):
     if not SHEET_READY or ws_nap_tien is None:
         return "❌ Hệ thống lịch sử nạp tiền đang lỗi."
@@ -1286,15 +1287,19 @@ def webhook_casso():
         user_id = int(m.group(1))
         ensure_user_exists(user_id, "")
         new_bal = add_balance(user_id, amount)
+
         # ===== GHI LỊCH SỬ NẠP TIỀN =====
         log_nap_tien(
                 user_id=user_id,
                 username="",
                 amount=amount,
+                loai="CASSO",
                 tx_id=tx_id,
                 note="AUTO CASSO"
         )
+
         log_row(user_id, "", "TOPUP_AUTO", amount, f"TX:{tx_id}")
+
 
         tg_send(
             user_id,
