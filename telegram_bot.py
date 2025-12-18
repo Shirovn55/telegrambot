@@ -39,11 +39,30 @@ BOT_TOKEN  = os.getenv("TELEGRAM_TOKEN", "").strip()
 SHEET_ID   = os.getenv("GOOGLE_SHEET_ID", "").strip()
 CREDS_JSON = os.getenv("GOOGLE_SHEETS_CREDS_JSON", "").strip()
 ADMIN_ID   = int(os.getenv("ADMIN_TELEGRAM_ID", "0"))
+CASSO_API_KEY = os.getenv("CASSO_API_KEY", "").strip()
+CASSO_WEBHOOK_SECRET = os.getenv("CASSO_WEBHOOK_SECRET", "").strip()
+
+SEEN_CASSO_TX_IDS = set()
 
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 QR_URL   = "https://img.vietqr.io/image/TPB-0819555000-compact.png"
 SAVE_URL = "https://shopee.vn/api/v2/voucher_wallet/save_vouchers"
+# =========================================================
+# VIETQR (AUTO TOPUP)
+# =========================================================
+def build_vietqr_url(user_id, amount=None):
+    """
+    Tạo QR chuyển khoản có sẵn nội dung: NAP <user_id>
+    """
+    base = "https://img.vietqr.io/image/MB-84568173842-compact.png"
+    params = [
+        f"addInfo=NAP%20{user_id}",
+        "accountName=PHAM%20HUU%20HUNG"
+    ]
+    if amount:
+        params.insert(0, f"amount={amount}")
+    return base + "?" + "&".join(params)
 
 # =========================================================
 # DEBUG FLAG
@@ -438,6 +457,61 @@ def process_combo1(cookie):
 # =========================================================
 # VOUCHER LIST TEXT (SHOW CHO USER)
 # =========================================================
+def build_voucher_inline_keyboard():
+    if not SHEET_READY:
+        return None
+
+    buttons = []
+
+    rows = ws_voucher.get_all_records()
+    for r in rows:
+        if r.get("Trạng Thái") == "Còn Mã":
+            name = r.get("Tên Mã")
+            price = r.get("Giá")
+            buttons.append([{
+                "text": f"🎁 {name} – {price} VNĐ",
+                "callback_data": f"BUY:{name}"
+            }])
+
+    # COMBO1
+    combo_items, err = get_vouchers_by_combo(COMBO1_KEY)
+    if not err:
+        total = sum(int(v.get("Giá", 0)) for v in combo_items)
+        buttons.append([{
+            "text": f"🎁 COMBO1 – {total} VNĐ ({len(combo_items)} mã)",
+            "callback_data": "BUY:combo1"
+        }])
+
+    return {"inline_keyboard": buttons}
+
+def build_voucher_info_text():
+    return (
+        "🎁 <b>VOUCHER HIỆN CÓ</b>\n"
+        "━━━━━━━━━━━━━━━\n"
+        "🟢 <b>Voucher đơn</b>\n"
+        "• Voucher100k — 💰Giá 1.000 VNĐ\n"
+        "• Voucher50max100 — 💰Giá 1.000 VNĐ\n"
+        "• VoucherHoaToc — 💰Giá 1.000 VNĐ\n\n"
+        "🟣 <b>COMBO</b>\n"
+        "• COMBO1: 100k/0đ + Freeship Hỏa Tốc\n"
+        "  💰 2.000 VNĐ | 🎫 2 mã\n\n"
+        "👇 <b>BẤM NÚT BÊN DƯỚI ĐỂ MUA</b>"
+    )
+def build_voucher_inline_keyboard():
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "💸 Mã 100k 0đ", "callback_data": "BUY:voucher100k"},
+                {"text": "💸 Mã 50% Max 100k ", "callback_data": "BUY:voucher50max100"},
+            ],
+            [
+                {"text": "🚀 Freeship Hỏa Tốc", "callback_data": "BUY:voucherHoaToc"},
+            ],
+            [
+                {"text": "🎁  COMBO1 – Mã 100k + Ship HT 🔥", "callback_data": "BUY:combo1"}
+            ]
+        ]
+    }
 
 def build_voucher_list_text():
     """
@@ -483,6 +557,53 @@ def build_voucher_list_text():
     )
 
     return "\n".join(out)
+def build_voucher_keyboard():
+    if not SHEET_READY:
+        return None
+
+    buttons = []
+
+    rows = ws_voucher.get_all_records()
+    for r in rows:
+        if r.get("Trạng Thái") == "Còn Mã":
+            name = r.get("Tên Mã")
+            price = r.get("Giá")
+            buttons.append([{
+                "text": f"🎁 {name} – {price} VNĐ",
+                "callback_data": f"BUY:{name}"
+            }])
+
+    # COMBO1
+    combo_items, err = get_vouchers_by_combo(COMBO1_KEY)
+    if not err:
+        total = sum(int(v.get("Giá", 0)) for v in combo_items)
+        buttons.append([{
+            "text": f"🎁 COMBO1 – {total} VNĐ ({len(combo_items)} mã)",
+            "callback_data": "BUY:combo1"
+        }])
+
+    return {"inline_keyboard": buttons}
+def build_quick_buy_keyboard(cmd):
+    """
+    Gửi lại đúng nút voucher/combo vừa mua
+    """
+    MAP = {
+        "voucher100k": "💸 Mã 100k 0đ",
+        "voucher50max100": "💸 Mã 50% Max 100k",
+        "voucherHoaToc": "🚀 Freeship Hỏa Tốc",
+        "combo1": "🎁 COMBO1 – Mã 100k + Ship HT 🔥"
+    }
+
+    text = MAP.get(cmd, f"🎁 {cmd}")
+
+    return {
+        "inline_keyboard": [
+            [
+                {"text": text, "callback_data": f"BUY:{cmd}"}
+            ]
+        ]
+    }
+
 # =========================================================
 # TOPUP HISTORY
 # =========================================================
@@ -518,23 +639,53 @@ def topup_history_text(user_id):
 # =========================================================
 # CALLBACK QUERY HANDLER (ADMIN)
 # =========================================================
-
 def handle_callback_query(cb):
     cb_id = cb.get("id")
-    admin_id = cb["from"]["id"]
     data = cb.get("data", "")
+    from_user = cb.get("from", {})
+    user_id = from_user.get("id")
+    username = from_user.get("username", "")
 
-    if admin_id != ADMIN_ID:
-        tg_answer_callback(cb_id, "Bạn không có quyền", True)
+    # =====================================================
+    # 🎁 USER BẤM NÚT MUA VOUCHER / COMBO
+    # callback_data = BUY:voucher100k | BUY:combo1
+    # =====================================================
+    if data.startswith("BUY:"):
+        cmd = data.split(":", 1)[1]
+
+        row, balance, status = get_user_data(user_id)
+        if not row:
+            tg_answer_callback(cb_id, "❌ Bạn chưa có ID", True)
+            return
+
+        if status != "active":
+            tg_answer_callback(cb_id, "❌ Tài khoản chưa được kích hoạt", True)
+            return
+
+        # set trạng thái chờ cookie
+        PENDING_VOUCHER[user_id] = cmd
+
+        tg_answer_callback(cb_id)
+        tg_send(
+            user_id,
+            f"👉 Gửi <b>cookie</b> vào đây để lưu <b>{cmd}</b>"
+        )
         return
 
-    # ===== ADMIN DUYỆT NẠP =====
+    # =====================================================
+    # 👑 ADMIN DUYỆT NẠP TIỀN
+    # callback_data = TOPUP_OK:user_id
+    # =====================================================
     if data.startswith("TOPUP_OK:"):
-        uid = int(data.split(":")[1])
+        if user_id != ADMIN_ID:
+            tg_answer_callback(cb_id, "❌ Không có quyền", True)
+            return
 
+        uid = int(data.split(":", 1)[1])
         info = PENDING_TOPUP.get(uid)
+
         if not info:
-            tg_answer_callback(cb_id, "Yêu cầu không tồn tại", True)
+            tg_answer_callback(cb_id, "❌ Yêu cầu không tồn tại", True)
             return
 
         WAIT_TOPUP_AMOUNT[ADMIN_ID] = {
@@ -542,20 +693,27 @@ def handle_callback_query(cb):
             "file_unique_id": info.get("file_unique_id", "")
         }
 
-        tg_answer_callback(cb_id, "Nhập số tiền để cộng", False)
+        tg_answer_callback(cb_id)
         tg_send(
             ADMIN_ID,
             f"💰 Nhập số tiền cộng cho <code>{uid}</code>\nVD: <b>50000</b>"
         )
         return
 
-    # ===== ADMIN TỪ CHỐI =====
+    # =====================================================
+    # ❌ ADMIN TỪ CHỐI NẠP TIỀN
+    # callback_data = TOPUP_NO:user_id
+    # =====================================================
     if data.startswith("TOPUP_NO:"):
-        uid = int(data.split(":")[1])
+        if user_id != ADMIN_ID:
+            tg_answer_callback(cb_id, "❌ Không có quyền", True)
+            return
+
+        uid = int(data.split(":", 1)[1])
 
         PENDING_TOPUP.pop(uid, None)
-        tg_answer_callback(cb_id, "Đã từ chối", False)
 
+        tg_answer_callback(cb_id)
         tg_send(
             uid,
             "❌ <b>Nạp tiền bị từ chối</b>\nVui lòng liên hệ admin."
@@ -563,8 +721,10 @@ def handle_callback_query(cb):
         log_row(uid, "", "TOPUP_REJECT", "", "Admin reject")
         return
 
-    tg_answer_callback(cb_id, "Action không hỗ trợ", True)
-
+    # =====================================================
+    # ⚠️ CALLBACK KHÔNG HỖ TRỢ
+    # =====================================================
+    tg_answer_callback(cb_id, "⚠️ Thao tác không hỗ trợ", True)
 
 # =========================================================
 # NHẬN BILL (PHOTO / DOCUMENT)
@@ -784,20 +944,25 @@ def handle_update(update):
             )
         return
 
-    # ===== MENU: NẠP TIỀN =====
+    # ===== MENU: NẠP TIỀN (AUTO CASSO) =====
     if text == "💳 Nạp tiền":
         ensure_user_exists(user_id, username)
+
+        qr = build_vietqr_url(user_id)
+
         tg_send_photo(
             chat_id,
-            QR_URL,
+            qr,
             caption=(
-                "💳 <b>NẠP TIỀN</b>\n\n"
+                "💳 <b>NẠP TIỀN TỰ ĐỘNG</b>\n\n"
                 "📌 <b>NỘI DUNG CK</b>\n"
                 f"<code>NAP {user_id}</code>\n\n"
-                "📸 Gửi <b>ẢNH BILL</b> sau khi chuyển."
+                "⚡ Chuyển xong đợi 1-3 phút hệ thống cộng tiền\n"
+                "❌ Không thấy tiền cộng inbox admin @BonBonxHPx"
             )
         )
         return
+
 
     # ===== LẤY USER DATA =====
     row, balance, status = get_user_data(user_id)
@@ -821,8 +986,13 @@ def handle_update(update):
 
     # ===== MENU: XEM VOUCHER (KHÔNG CHẶN ACTIVE) =====
     if text in ("🎟️Lưu Voucher", "Voucher", "🎟️ Voucher"):
-        tg_send(chat_id, build_voucher_list_text())
+        tg_send(
+            chat_id,
+            build_voucher_info_text(),
+            build_voucher_inline_keyboard()
+        )
         return
+
 
     # =====================================================
     # ===== CHẶN LƯU NẾU CHƯA ACTIVE =====
@@ -877,7 +1047,14 @@ def handle_update(update):
                 for name, reason in failed:
                     msg += f"- {name}: {reason}\n"
 
-            tg_send(chat_id, msg, build_main_keyboard())
+            tg_send(chat_id, msg)
+
+            # 👉 GỬI LẠI NÚT COMBO VỪA LƯU
+            tg_send(
+                chat_id,
+                "👉 <b>Bấm để lưu tiếp nhanh</b>",
+                build_quick_buy_keyboard("combo1")
+            )
             return
 
         # ----- VOUCHER ĐƠN -----
@@ -905,10 +1082,16 @@ def handle_update(update):
             chat_id,
             f"✅ <b>Thành công</b>\n"
             f"💸 -{price}\n"
-            f"💰 Còn: <b>{new_bal}</b>",
-            build_main_keyboard()
+            f"💰 Còn: <b>{new_bal}</b>"
         )
-        return
+
+        # 👉 GỬI LẠI NÚT VỪA MUA
+        tg_send(
+            chat_id,
+            "👉 <b>Bấm để lưu tiếp nhanh</b>",
+            build_quick_buy_keyboard(cmd)
+        )
+        
 
     # =====================================================
     # ===== CÁCH 1: /voucherxxx <cookie> | /combo1 <cookie>
@@ -1002,6 +1185,78 @@ def home():
     if not SHEET_READY:
         return "Bot running, Sheet ERROR", 500
     return "Bot is running", 200
+
+
+# =========================================================
+# CASSO WEBHOOK — AUTO TOPUP
+# =========================================================
+
+@app.route("/webhook-casso", methods=["POST"])
+def webhook_casso():
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        print("💳 CASSO WEBHOOK DATA:", data)
+
+        # ===== CHO PHÉP CALL TEST TỪ CASSO =====
+        secret = request.headers.get("X-Casso-Secret", "")
+        if CASSO_WEBHOOK_SECRET and secret != CASSO_WEBHOOK_SECRET:
+            return "INVALID_SECRET", 403
+
+        # ===== TEST CALL KHÔNG CÓ AMOUNT → OK =====
+        if "amount" not in data:
+            return "OK", 200
+
+        tx_id = str(
+            data.get("id")
+            or data.get("transaction_id")
+            or data.get("reference")
+            or ""
+        )
+
+        amount = int(float(data.get("amount", 0)))
+        desc = str(data.get("description", "")).strip()
+
+        if not tx_id or amount <= 0:
+            return "IGNORE", 200
+
+        if tx_id in SEEN_CASSO_TX_IDS:
+            return "DUPLICATE", 200
+
+        parts = desc.upper().split()
+        if len(parts) < 2 or parts[0] != "NAP" or not parts[1].isdigit():
+            return "IGNORE", 200
+
+        user_id = int(parts[1])
+
+        ensure_user_exists(user_id, "")
+        new_bal = add_balance(user_id, amount)
+
+        log_row(
+            user_id,
+            "",
+            "TOPUP_AUTO",
+            str(amount),
+            f"CASSO:{tx_id}"
+        )
+
+        SEEN_CASSO_TX_IDS.add(tx_id)
+
+        tg_send(
+            user_id,
+            (
+                "✅ <b>NẠP TIỀN THÀNH CÔNG</b>\n"
+                f"💰 +{amount}\n"
+                f"💼 Số dư: <b>{new_bal}</b>"
+            )
+        )
+
+        return "OK", 200
+
+    except Exception as e:
+        print("❌ CASSO ERROR:", e)
+        return "ERROR", 500
+
+
 
 
 @app.route("/webhook", methods=["POST"])
