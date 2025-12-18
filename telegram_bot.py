@@ -1192,120 +1192,114 @@ def home():
 # =========================================================
 # CASSO WEBHOOK — AUTO TOPUP
 # =========================================================
+import hmac
+import hashlib
 
-@app.route("/webhook-casso", methods=["POST"])
+def _sort_obj(obj):
+        if isinstance(obj, dict):
+                return {k: _sort_obj(obj[k]) for k in sorted(obj.keys())}
+        if isinstance(obj, list):
+                return [_sort_obj(x) for x in obj]
+        return obj
+
+def _verify_casso_v2_signature(req, checksum_key: str) -> bool:
+        sig = req.headers.get("X-Casso-Signature") or req.headers.get("x-casso-signature") or ""
+        if not sig or not checksum_key:
+                return False
+
+        # sig: "t=1734924830020,v1=...."
+        parts = {}
+        for item in sig.split(","):
+                item = item.strip()
+                if "=" in item:
+                        k, v = item.split("=", 1)
+                        parts[k.strip()] = v.strip()
+
+        t = parts.get("t", "")
+        v1 = parts.get("v1", "")
+        if not t or not v1:
+                return False
+
+        raw = req.get_json(force=True, silent=True) or {}
+        data_obj = raw.get("data", {})
+
+        sorted_data = _sort_obj(data_obj)
+        json_str = json.dumps(sorted_data, ensure_ascii=False, separators=(",", ":"))
+
+        payload = f"{t}.{json_str}".encode("utf-8")
+        mac = hmac.new(checksum_key.encode("utf-8"), payload, hashlib.sha512).hexdigest()
+
+        return hmac.compare_digest(mac, v1)
+
+@app.route("/webhook-casso", methods=["POST", "GET"])
 def webhook_casso():
-    try:
-        # ===============================
-        # 1. LẤY DATA JSON
-        # ===============================
-        data = request.get_json(force=True, silent=True) or {}
+        try:
+                if request.method == "GET":
+                        return "OK", 200
 
-        if DEBUG:
-            print("[CASSO] RAW DATA:", data)
+                data = request.get_json(force=True, silent=True) or {}
 
-        # ===============================
-        # 2. VERIFY CASSO WEBHOOK SIGNATURE (V2 - CHUẨN DOCS)
-        # ===============================
-        signature = (
-                request.headers.get("X-Casso-Signature")
-                or request.headers.get("x-casso-signature")
-                or ""
-        )
+                # ✅ Verify theo chuẩn Webhook V2
+                if CASSO_WEBHOOK_SECRET:
+                        if not _verify_casso_v2_signature(request, CASSO_WEBHOOK_SECRET):
+                                print("[CASSO] ❌ INVALID_SIGNATURE")
+                                return "INVALID_SIGNATURE", 403
 
-        raw_body = request.get_data(as_text=True)
+                # data.get("data") có thể là list hoặc dict
+                txs = data.get("data")
+                if isinstance(txs, dict):
+                        transactions = [txs]
+                elif isinstance(txs, list):
+                        transactions = txs
+                else:
+                        transactions = []
 
-        if DEBUG:
-                print("[CASSO] RAW BODY:", raw_body)
-                print("[CASSO] SIGNATURE HEADER:", signature)
+                for tx in transactions:
+                        if not isinstance(tx, dict):
+                                continue
 
-        if CASSO_WEBHOOK_SECRET:
-                expected_signature = hmac.new(
-                        CASSO_WEBHOOK_SECRET.encode("utf-8"),
-                        raw_body.encode("utf-8"),
-                        hashlib.sha256
-                ).hexdigest()
+                        tx_id = str(tx.get("id") or tx.get("tid") or tx.get("transaction_id") or "").strip()
+                        amount = int(tx.get("amount") or 0)
+                        description = str(tx.get("description") or "").strip()
 
-                if not hmac.compare_digest(signature, expected_signature):
-                        print("[CASSO] ❌ INVALID SIGNATURE")
-                        print("[CASSO] EXPECTED:", expected_signature)
-                        return "INVALID_SECRET", 403
+                        if not tx_id or amount <= 0:
+                                continue
 
+                        if tx_id in SEEN_CASSO_TX_IDS:
+                                continue
+                        SEEN_CASSO_TX_IDS.add(tx_id)
 
-        # ===============================
-        # 3. LẤY DANH SÁCH GIAO DỊCH
-        # ===============================
-        transactions = data.get("data", [])
-        if not isinstance(transactions, list):
-            return "OK", 200
+                        m = re.search(r"\bNAP\s+(\d+)\b", description, re.IGNORECASE)
+                        if not m:
+                                continue
 
-        # ===============================
-        # 4. DUYỆT TỪNG GIAO DỊCH
-        # ===============================
-        for tx in transactions:
-            tx_id = str(
-                tx.get("id")
-                or tx.get("tid")
-                or tx.get("transaction_id")
-                or ""
-            ).strip()
+                        user_id = int(m.group(1))
 
-            amount = int(tx.get("amount", 0))
-            description = (tx.get("description") or "").strip()
+                        ensure_user_exists(user_id, "")
+                        new_bal = add_balance(user_id, amount)
 
-            if not tx_id or amount <= 0:
-                continue
+                        log_row(
+                                user_id,
+                                "",
+                                "TOPUP_AUTO",
+                                str(amount),
+                                f"TX:{tx_id} | {description}"
+                        )
 
-            # ---- CHỐNG CỘNG TRÙNG ----
-            if tx_id in SEEN_CASSO_TX_IDS:
-                continue
-            SEEN_CASSO_TX_IDS.add(tx_id)
+                        tg_send(
+                                user_id,
+                                f"💰 <b>NẠP TIỀN THÀNH CÔNG</b>\n\n"
+                                f"➕ Số tiền: <b>{amount:,}đ</b>\n"
+                                f"💼 Số dư mới: <b>{new_bal:,}đ</b>\n"
+                                f"🧾 Mã GD: <code>{tx_id}</code>"
+                        )
 
-            if DEBUG:
-                print(f"[CASSO] TX {tx_id} | +{amount} | {description}")
+                return "OK", 200
 
-            # ===============================
-            # 5. PARSE USER ID (NAP <id>)
-            # ===============================
-            m = re.search(r"\bNAP\s+(\d+)\b", description, re.IGNORECASE)
-            if not m:
-                continue
+        except Exception as e:
+                print("[CASSO] ❌ ERROR:", repr(e))
+                return "ERROR", 500
 
-            user_id = int(m.group(1))
-
-            # ===============================
-            # 6. CỘNG TIỀN (HÀM ĐÚNG)
-            # ===============================
-            ensure_user_exists(user_id, "")
-            new_bal = add_balance(user_id, amount)
-
-            # ===============================
-            # 7. GHI LOG GOOGLE SHEET
-            # ===============================
-            log_row(
-                user_id,
-                "",
-                "TOPUP_AUTO",
-                str(amount),
-                f"TX:{tx_id} | {description}"
-            )
-
-            # ===============================
-            # 8. NHẮN TELEGRAM CHO USER
-            # ===============================
-            tg_send(
-                user_id,
-                f"💰 <b>NẠP TIỀN THÀNH CÔNG</b>\n\n"
-                f"➕ Số tiền: <b>{amount:,}đ</b>\n"
-                f"💼 Số dư mới: <b>{new_bal:,}đ</b>\n"
-                f"🧾 Mã GD: <code>{tx_id}</code>"
-            )
-
-        return "OK", 200
-
-    except Exception as e:
-        print("[CASSO] ❌ ERROR:", e)
-        return "ERROR", 500
 
 
 
