@@ -50,12 +50,7 @@ BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 QR_URL   = "https://img.vietqr.io/image/TPB-0819555000-compact.png"
 SAVE_URL = "https://shopee.vn/api/v2/voucher_wallet/save_vouchers"
-ws_nap_tien = None
 
-try:
-    ws_nap_tien = sh.worksheet("Nap Tien")
-except Exception as e:
-    print("❌ Không tìm thấy tab Nap Tien:", e)
 
 # =========================================================
 # VIETQR (AUTO TOPUP)
@@ -81,15 +76,15 @@ DEBUG = True
 def dprint(*args):
     if DEBUG:
         print("[DEBUG]", *args)
-
 # =========================================================
 # GOOGLE SHEET CONNECT
 # =========================================================
 SHEET_READY = False
 
-ws_money   = None
-ws_voucher = None
-ws_log     = None
+ws_money    = None   # Thanh Toan
+ws_voucher  = None   # VoucherStock
+ws_log      = None   # Logs
+ws_nap_tien = None   # Nap Tien
 
 scope = [
     "https://spreadsheets.google.com/feeds",
@@ -101,14 +96,24 @@ try:
         raise Exception("CREDS_JSON is empty")
 
     creds = ServiceAccountCredentials.from_json_keyfile_dict(
-        json.loads(CREDS_JSON), scope
+        json.loads(CREDS_JSON),
+        scope
     )
+
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(SHEET_ID)
 
+    # ===== LOAD CÁC TAB =====
     ws_money   = sh.worksheet("Thanh Toan")
     ws_voucher = sh.worksheet("VoucherStock")
     ws_log     = sh.worksheet("Logs")
+
+    try:
+        ws_nap_tien = sh.worksheet("Nap Tien")
+        print("✅ Đã load tab Nap Tien")
+    except Exception as e:
+        ws_nap_tien = None
+        print("❌ Không tìm thấy tab Nap Tien:", e)
 
     SHEET_READY = True
     print("✅ Google Sheet connected")
@@ -116,6 +121,7 @@ try:
 except Exception as e:
     print("❌ Google Sheet ERROR:", e)
     SHEET_READY = False
+
 
 # =========================================================
 # STATE (GLOBAL)
@@ -677,31 +683,41 @@ def log_nap_tien(user_id, username, amount, loai="AUTO", tx_id="", note=""):
         print("[NAP_TIEN_LOG_ERROR]", e)
 
 def topup_history_text(user_id, limit=10):
+    """
+    Lịch sử nạp tiền AUTO (Casso)
+    Đọc từ tab 'Nap Tien'
+    """
     if not SHEET_READY or ws_nap_tien is None:
         return "❌ Hệ thống lịch sử nạp tiền đang lỗi."
 
     try:
         rows = ws_nap_tien.get_all_records()
     except Exception:
-        return "❌ Không đọc được dữ liệu nạp tiền."
+        return "❌ Không đọc được dữ liệu lịch sử nạp tiền."
 
-    history = [
-        r for r in rows
-        if str(r.get("user_id")) == str(user_id)
-    ]
+    logs = []
+    for r in rows:
+        if (
+            str(r.get("Tele ID", "")) == str(user_id)
+            and str(r.get("loại", "")).upper() == "AUTO CASSO"
+        ):
+            logs.append(r)
 
-    if not history:
-        return "📜 <b>Lịch sử nạp tiền</b>\nChưa có giao dịch nào."
+    if not logs:
+        return "📜 <b>Lịch sử nạp tiền</b>\nChưa có giao dịch nạp tự động."
 
-    history = history[-limit:]
+    logs = logs[-limit:]
 
-    out = ["📜 <b>Lịch sử nạp tiền (mới nhất)</b>"]
-    for r in reversed(history):
+    out = ["📜 <b>Lịch sử nạp tiền tự động (Casso)</b>"]
+    for r in logs:
         out.append(
-            f"- {r.get('time')} | +{int(r.get('amount')):,}đ | {r.get('note')}"
+            f"- {r.get('time')} | "
+            f"+{int(r.get('số tiền', 0)):,}đ | "
+            f"{r.get('tx_id')}"
         )
 
     return "\n".join(out)
+
 
 
 # =========================================================
