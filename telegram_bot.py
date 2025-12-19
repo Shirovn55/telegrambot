@@ -784,7 +784,19 @@ def handle_callback_query(cb):
             tg_answer_callback(cb_id, "❌ Tài khoản chưa được kích hoạt", True)
             return
 
-        # set trạng thái chờ cookie
+        # ===== CHECK HẾT MÃ NGAY TỪ NÚT BẤM =====
+        if cmd != COMBO1_KEY:
+            v, err = get_voucher(cmd)
+            if err:
+                tg_answer_callback(cb_id, f"❌ {err}", True)
+                return
+        else:
+            items, err = get_vouchers_by_combo(COMBO1_KEY)
+            if err:
+                tg_answer_callback(cb_id, f"❌ {err}", True)
+                return
+
+        # ===== OK -> CHO PHÉP GỬI COOKIE =====
         PENDING_VOUCHER[user_id] = cmd
 
         tg_answer_callback(cb_id)
