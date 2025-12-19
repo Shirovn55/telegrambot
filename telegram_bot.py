@@ -213,7 +213,7 @@ def tg_answer_callback(callback_id, text=None, show_alert=False):
 def build_main_keyboard():
     return {
         "keyboard": [
-            ["📩 Gửi ID kích hoạt", "💳 Nạp tiền"],
+            ["🎁 Kích Hoạt Tặng 5k", "💳 Nạp tiền"],
             ["💰 Số dư", "🎟️Lưu Voucher"],
             ["📜 Lịch sử nạp tiền"]
         ],
@@ -227,6 +227,44 @@ def build_topup_admin_kb(user_id):
             {"text": "❌ TỪ CHỐI", "callback_data": f"TOPUP_NO:{user_id}"}
         ]]
     }
+def handle_active_gift_5k(user_id, username):
+    """
+    Kích hoạt + tặng 5k (chỉ 1 lần)
+    """
+    if not SHEET_READY:
+        return False, "❌ Hệ thống đang lỗi."
+
+    row = get_user_row(user_id)
+
+    # Nếu chưa có user thì tạo
+    if not row:
+        row = ensure_user_exists(user_id, username)
+
+    data = ws_money.row_values(row)
+    status = data[3] if len(data) > 3 else ""
+
+    # Nếu đã kích hoạt hoặc đã nhận
+    if status in ("active", "trial_used"):
+        return False, "⚠️ ACC đã kích hoạt và nhận khuyến mãi rồi."
+
+    # 👉 Set active
+    ws_money.update_cell(row, 4, "active")
+
+    # 👉 Cộng 5k
+    new_bal = add_balance(user_id, 5000)
+
+    # 👉 Đánh dấu đã nhận KM
+    ws_money.update_cell(row, 4, "trial_used")
+
+    log_row(
+        user_id,
+        username,
+        "ACTIVE_GIFT_5K",
+        "5000",
+        "Kích hoạt + tặng 5k"
+    )
+
+    return True, new_bal
 
 # =========================================================
 # FILE / LOG UTIL
@@ -1012,23 +1050,25 @@ def handle_update(update):
         )
         return
 
-    # ===== MENU: GỬI ID =====
-    if text == "📩 Gửi ID kích hoạt":
-        row = get_user_row(user_id)
-        if row:
-            tg_send(
-                chat_id,
-                f"🆔 ID của bạn: <b>{user_id}</b>\n"
-                "⏳ Chờ admin kích hoạt."
-            )
-        else:
-            ensure_user_exists(user_id, username)
-            tg_send(
-                chat_id,
-                f"📩 Đã gửi ID!\n🆔 <b>{user_id}</b>\n"
-                "Vui lòng liên hệ admin để nạp tiền."
-            )
+    # ===== MENU: KÍCH HOẠT + TẶNG 5K =====
+    if text == "🎁 Kích Hoạt Tặng 5k":
+        ok, result = handle_active_gift_5k(user_id, username)
+
+        if not ok:
+            tg_send(chat_id, result)
+            return
+
+        tg_send(
+            chat_id,
+            f"🎉 <b>KÍCH HOẠT THÀNH CÔNG</b>\n\n"
+            f"🆔 ID: <code>{user_id}</code>\n"
+            f"🎁 Khuyến mãi: <b>+5.000đ</b>\n"
+            f"💰 Số dư hiện tại: <b>{result:,}đ</b>\n\n"
+            f"✅ ACC đã sẵn sàng sử dụng!",
+            build_main_keyboard()
+        )
         return
+
 
     # ===== MENU: NẠP TIỀN (AUTO CASSO) =====
     if text == "💳 Nạp tiền":
