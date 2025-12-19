@@ -580,23 +580,37 @@ def build_voucher_info_text():
 
     out.append("\n👇 <b>BẤM NÚT BÊN DƯỚI ĐỂ MUA</b>")
     return "\n".join(out)
-
 def build_quick_voucher_keyboard():
-    return {
-        "inline_keyboard": [
-            [
-                {"text": "💸 Mã 100k 0đ", "callback_data": "BUY:voucher100k"},
-                {"text": "💸 Mã 50% Max 100k", "callback_data": "BUY:voucher50max100"},
-            ],
-            [
-                {"text": "🚀 Freeship Hỏa Tốc", "callback_data": "BUY:voucherHoaToc"},
-            ],
-            [
-                {"text": "🎁 COMBO1 | Mã 100k + Ship HT 🔥", "callback_data": "BUY:combo1"}
-            ]
-        ]
-    }
+    if not SHEET_READY:
+        return None
 
+    buttons = []
+
+    # ===== VOUCHER ĐƠN =====
+    for key, label in [
+        ("voucher100k", "💸 Mã 100k 0đ"),
+        ("voucher50max100", "💸 Mã 50% Max 100k"),
+        ("voucherHoaToc", "🚀 Freeship Hỏa Tốc"),
+    ]:
+        v, err = get_voucher(key)
+        if not err:
+            buttons.append([{
+                "text": label,
+                "callback_data": f"BUY:{key}"
+            }])
+
+    # ===== COMBO =====
+    items, err = get_vouchers_by_combo(COMBO1_KEY)
+    if not err and items:
+        buttons.append([{
+            "text": "🎁 COMBO1 | Mã 100k + Ship HT 🔥",
+            "callback_data": "BUY:combo1"
+        }])
+
+    if not buttons:
+        return None
+
+    return {"inline_keyboard": buttons}
 
 def build_voucher_list_text():
     """
