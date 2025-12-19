@@ -254,7 +254,7 @@ def handle_active_gift_5k(user_id, username):
     new_bal = add_balance(user_id, 5000)
 
     # 👉 Đánh dấu đã nhận KM
-    ws_money.update_cell(row, 4, "trial_used")
+    ws_money.update_cell(row, 4, "active")
 
     log_row(
         user_id,
@@ -544,7 +544,7 @@ def build_voucher_info_text():
         "🎁 <b>VOUCHER HIỆN CÓ</b>\n"
         "━━━━━━━━━━━━━━━\n"
         "🟢 <b>Voucher đơn</b>\n"
-        "• Voucher100k — 💰Giá 1.000 VNĐ-Hết mã\n"
+        "• Voucher100k — 💰Giá 1.000 VNĐ\n"
         "• Voucher50max100 — 💰Giá 1.000 VNĐ\n"
         "• VoucherHoaToc — 💰Giá 1.000 VNĐ\n\n"
         "🟣 <b>COMBO</b>\n"
@@ -556,7 +556,7 @@ def build_quick_voucher_keyboard():
     return {
         "inline_keyboard": [
             [
-                {"text": "💸 Mã 100k 0--Hết mã", "callback_data": "BUY:voucher100k"},
+                {"text": "💸 Mã 100k 0đ ", "callback_data": "BUY:voucher100k"},
                 {"text": "💸 Mã 50% Max 100k", "callback_data": "BUY:voucher50max100"},
             ],
             [
