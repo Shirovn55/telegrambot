@@ -540,18 +540,47 @@ def build_voucher_inline_keyboard():
     return {"inline_keyboard": buttons}
 
 def build_voucher_info_text():
-    return (
-        "🎁 <b>VOUCHER HIỆN CÓ</b>\n"
-        "━━━━━━━━━━━━━━━\n"
-        "🟢 <b>Voucher đơn</b>\n"
-        "• Voucher100k — 💰Giá 1.000 VNĐ\n"
-        "• Voucher50max100 — 💰Giá 1.000 VNĐ\n"
-        "• VoucherHoaToc — 💰Giá 1.000 VNĐ\n\n"
-        "🟣 <b>COMBO</b>\n"
-        "• COMBO1: 100k/0đ + Freeship Hỏa Tốc\n"
-        "  💰 2.000 VNĐ | 🎫 2 mã\n\n"
-        "👇 <b>BẤM NÚT BÊN DƯỚI ĐỂ MUA</b>"
-    )
+    if not SHEET_READY:
+        return "❌ Hệ thống Sheet đang lỗi"
+
+    try:
+        rows = ws_voucher.get_all_records()
+    except Exception:
+        return "❌ Không đọc được VoucherStock"
+
+    singles = []
+    combos = []
+
+    for r in rows:
+        if r.get("Trạng Thái") == "Còn Mã":
+            singles.append(
+                f"• {r.get('Tên Mã')} — 💰 <b>Giá {r.get('Giá')} VNĐ</b>"
+            )
+
+    combo_items, err = get_vouchers_by_combo(COMBO1_KEY)
+    if not err:
+        total = sum(int(v.get("Giá", 0)) for v in combo_items)
+        combos.append(
+            f"• COMBO1: 100k/0đ + Freeship Hỏa Tốc\n"
+            f"  💰 <b>{total} VNĐ</b> | 🎫 <b>{len(combo_items)}</b> mã"
+        )
+
+    if not singles and not combos:
+        return "❌ Hiện tại không còn voucher nào."
+
+    out = ["🎁 <b>VOUCHER HIỆN CÓ</b>\n━━━━━━━━━━━━━━━"]
+
+    if singles:
+        out.append("🟢 <b>Voucher đơn</b>")
+        out.extend(singles)
+
+    if combos:
+        out.append("\n🟣 <b>COMBO</b>")
+        out.extend(combos)
+
+    out.append("\n👇 <b>BẤM NÚT BÊN DƯỚI ĐỂ MUA</b>")
+    return "\n".join(out)
+
 def build_quick_voucher_keyboard():
     return {
         "inline_keyboard": [
@@ -1132,6 +1161,38 @@ def handle_update(update):
             build_quick_voucher_keyboard()
 
         )
+        return
+    # =====================================================
+    # QUICK BUY TEXT – CHECK HẾT MÃ (BẮT BUỘC)
+    # =====================================================
+    BUY_TEXT_MAP = {
+        "💸 Mã 100k 0đ": "voucher100k",
+        "💸 Mã 50% Max 100k": "voucher50max100",
+        "🚀 Freeship Hỏa Tốc": "voucherHoaToc",
+        "🎁 COMBO1 | Mã 100k + Ship HT 🔥": "combo1",
+    }
+
+    if text in BUY_TEXT_MAP:
+        cmd = BUY_TEXT_MAP[text]
+
+        if status != "active":
+            tg_send(chat_id, "❌ Tài khoản chưa được kích hoạt.")
+            return
+
+        # ===== CHECK HẾT MÃ TỪ SHEET =====
+        if cmd != COMBO1_KEY:
+            v, err = get_voucher(cmd)
+            if err:
+                tg_send(chat_id, f"❌ {err}")
+                return
+        else:
+            items, err = get_vouchers_by_combo(COMBO1_KEY)
+            if err:
+                tg_send(chat_id, f"❌ {err}")
+                return
+
+        PENDING_VOUCHER[user_id] = cmd
+        tg_send(chat_id, f"👉 Gửi <b>cookie</b> vào đây để lưu <b>{cmd}</b>")
         return
 
 
