@@ -1064,10 +1064,11 @@ def handle_update(update):
             f"🆔 ID: <code>{user_id}</code>\n"
             f"🎁 Khuyến mãi: <b>+5.000đ</b>\n"
             f"💰 Số dư hiện tại: <b>{result:,}đ</b>\n\n"
-            f"✅ ACC đã sẵn sàng sử dụng!",
+            f"👉 <b>Bấm nút bên dưới để sử dụng ngay</b>",
             build_main_keyboard()
         )
         return
+
 
 
     # ===== MENU: NẠP TIỀN (AUTO CASSO) =====
@@ -1101,7 +1102,8 @@ def handle_update(update):
         tg_send(
             chat_id,
             f"💰 <b>Số dư:</b> <b>{balance}</b>\n"
-            f"📌 Trạng thái: <b>{status}</b>"
+            f"📌 Trạng thái: <b>{status}</b>",
+            build_main_keyboard()
         )
         return
 
@@ -1218,7 +1220,7 @@ def handle_update(update):
             "👉 <b>Bấm để lưu tiếp nhanh</b>",
             build_quick_buy_keyboard(cmd)
         )
-        
+        return
 
     # =====================================================
     # ===== CÁCH 1: /voucherxxx <cookie> | /combo1 <cookie>
