@@ -545,7 +545,7 @@ def build_voucher_info_text():
         "━━━━━━━━━━━━━━━\n"
         "🟢 <b>Voucher đơn</b>\n"
         "• Voucher100k — 💰Giá 1.000 VNĐ\n"
-        "• Voucher50max100 — 💰Giá 1.000 VNĐ\n"
+        "• Voucher50max200 — 💰Giá 1.000 VNĐ\n"
         "• VoucherHoaToc — 💰Giá 1.000 VNĐ\n\n"
         "🟣 <b>COMBO</b>\n"
         "• COMBO1: 100k/0đ + Freeship Hỏa Tốc\n"
@@ -557,7 +557,7 @@ def build_quick_voucher_keyboard():
         "inline_keyboard": [
             [
                 {"text": "💸 Mã 100k 0đ ", "callback_data": "BUY:voucher100k"},
-                {"text": "💸 Mã 50% Max 100k", "callback_data": "BUY:voucher50max100"},
+                {"text": "💸 Mã 50% Max 200k", "callback_data": "BUY:voucher50max200"},
             ],
             [
                 {"text": "🚀 Freeship Hỏa Tốc", "callback_data": "BUY:voucherHoaToc"},
@@ -645,7 +645,7 @@ def build_quick_buy_keyboard(cmd):
     """
     MAP = {
         "voucher100k": "💸 Mã 100k 0đ",
-        "voucher50max100": "💸 Mã 50% Max 100k",
+        "voucher50max200": "💸 Mã 50% Max 200k",
         "voucherHoaToc": "🚀 Freeship Hỏa Tốc",
         "combo1": "🎁 COMBO1 – Mã 100k + Ship HT 🔥"
     }
