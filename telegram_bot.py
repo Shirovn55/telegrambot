@@ -326,7 +326,7 @@ def ensure_user_exists(user_id, username):
             str(user_id),
             username,
             0,
-            "pending",
+            "active",
             "auto from bot"
         ])
     except Exception as e:
@@ -1040,15 +1040,41 @@ def handle_update(update):
     if handle_admin_amount_input(user_id, text):
         return
 
-    # ===== /start =====
+    # ===== /start (AUTO ACTIVE) =====
     if text == "/start":
-        ensure_user_exists(user_id, username)
-        tg_send(
-            chat_id,
-            "👋 <b>Chào bạn!</b>\nChọn chức năng bên dưới 👇",
-            build_main_keyboard()
-        )
+        row = ensure_user_exists(user_id, username)
+        _, balance, status = get_user_data(user_id)
+
+        # 👉 CHƯA ACTIVE → AUTO ACTIVE + TẶNG 5K
+        if status not in ("active", "trial_used"):
+            ws_money.update_cell(row, 4, "active")
+            new_bal = add_balance(user_id, 5000)
+
+            log_row(
+                user_id,
+                username,
+                "AUTO_ACTIVE",
+                "5000",
+                "Auto kích hoạt khi /start"
+            )
+
+            tg_send(
+                chat_id,
+                f"🎉 <b>KÍCH HOẠT THÀNH CÔNG</b>\n\n"
+                f"🆔 ID: <code>{user_id}</code>\n"
+                f"🎁 Tặng: <b>+5.000đ</b>\n"
+                f"💰 Số dư: <b>{new_bal:,}đ</b>\n\n"
+                f"👉 Sử dụng ngay bên dưới 👇",
+                build_main_keyboard()
+            )
+        else:
+            tg_send(
+                chat_id,
+                "👋 <b>Chào mừng quay lại!</b>",
+                build_main_keyboard()
+            )
         return
+
 
     # ===== MENU: KÍCH HOẠT + TẶNG 5K =====
     if text == "🎁 Kích Hoạt Tặng 5k":
