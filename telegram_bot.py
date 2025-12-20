@@ -1043,11 +1043,12 @@ def handle_update(update):
     # ===== /start (AUTO ACTIVE) =====
     if text == "/start":
         row = ensure_user_exists(user_id, username)
-        _, balance, status = get_user_data(user_id)
+        row, balance, status = get_user_data(user_id)
 
-        # 👉 CHƯA ACTIVE → AUTO ACTIVE + TẶNG 5K
-        if status not in ("active", "trial_used"):
+        # 👉 CHƯA ACTIVE HOẶC CHƯA CÓ TIỀN → AUTO KÍCH + TẶNG 5K
+        if status != "active" or balance == 0:
             ws_money.update_cell(row, 4, "active")
+
             new_bal = add_balance(user_id, 5000)
 
             log_row(
@@ -1062,9 +1063,8 @@ def handle_update(update):
                 chat_id,
                 f"🎉 <b>KÍCH HOẠT THÀNH CÔNG</b>\n\n"
                 f"🆔 ID: <code>{user_id}</code>\n"
-                f"🎁 Tặng: <b>+5.000đ</b>\n"
-                f"💰 Số dư: <b>{new_bal:,}đ</b>\n\n"
-                f"👉 Sử dụng ngay bên dưới 👇",
+                f"🎁 +5.000đ\n"
+                f"💰 Số dư: <b>{new_bal:,}đ</b>",
                 build_main_keyboard()
             )
         else:
