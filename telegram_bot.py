@@ -387,7 +387,7 @@ def get_voucher(cmd):
         name = str(r.get("Tên Mã", "")).replace(" ", "").lower()
         if name == cmd.lower():
             if r.get("Trạng Thái") != "Còn Mã":
-                return None, "Voucher đã hết"
+                return None, "Lưu thất Bại. Vui lòng kiểm tra lại cookie - mã"
             return r, None
 
     return None, "Không tìm thấy voucher"
