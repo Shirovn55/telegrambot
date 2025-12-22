@@ -41,10 +41,9 @@ BOT_TOKEN  = os.getenv("TELEGRAM_TOKEN", "").strip()
 SHEET_ID   = os.getenv("GOOGLE_SHEET_ID", "").strip()
 CREDS_JSON = os.getenv("GOOGLE_SHEETS_CREDS_JSON", "").strip()
 ADMIN_ID   = int(os.getenv("ADMIN_TELEGRAM_ID", "0"))
-CASSO_API_KEY = os.getenv("CASSO_API_KEY", "").strip()
-CASSO_WEBHOOK_SECRET = os.getenv("CASSO_WEBHOOK_SECRET", "").strip()
+PAYFS_API_KEY = os.getenv("PAYFS_API_KEY", "").strip()
+PAYFS_WEBHOOK_SECRET = os.getenv("PAYFS_WEBHOOK_SECRET", "").strip()
 
-SEEN_CASSO_TX_IDS = set()
 
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
@@ -57,15 +56,19 @@ SAVE_URL = "https://shopee.vn/api/v2/voucher_wallet/save_vouchers"
 # =========================================================
 def build_vietqr_url(user_id, amount=None):
     """
-    Tạo QR chuyển khoản có sẵn nội dung: NAP <user_id>
+    Tạo QR VietQR OCB với nội dung chuyển khoản: NAP <user_id>
     """
-    base = "https://img.vietqr.io/image/MB-84568173842-compact.png"
+    base = "https://img.vietqr.io/image/OCB-0819555000-compact.png"
+
     params = [
         f"addInfo=NAP%20{user_id}",
         "accountName=PHAM%20HUU%20HUNG"
     ]
-    if amount:
-        params.insert(0, f"amount={amount}")
+
+    # Không khuyến nghị set amount, nhưng vẫn hỗ trợ nếu cần
+    if amount is not None:
+        params.insert(0, f"amount={int(amount)}")
+
     return base + "?" + "&".join(params)
 
 # =========================================================
@@ -546,7 +549,7 @@ def build_voucher_info_text():
         "🟢 <b>Voucher đơn</b>\n"
         "• Mã 100k 0đ — 💰Giá 1.000 VNĐ\n"
         "• Mã 30k All acc — 💰Giá HẾT MÃ \n"
-        "• Hết Mã - Freeship Hỏa Tốc — 💰Giá 1.000 VNĐ\n\n"
+        "• Freeship Hỏa Tốc — 💰Giá 1.000 VNĐ\n\n"
         "🟣 <b>COMBO</b>\n"
         "• COMBO1: 100k/0đ + Freeship Hỏa Tốc\n"
         "  💰 2.000 VNĐ | 🎫 2 mã\n\n"
@@ -560,7 +563,7 @@ def build_quick_voucher_keyboard():
                 {"text": "💸 Mã 30k-0đ HẾT MÃ", "callback_data": "BUY:voucher30k"},
             ],
             [
-                {"text": "🚀Hết Mã  Freeship Hỏa Tốc", "callback_data": "BUY:voucherHoaToc"},
+                {"text": "🚀 Freeship Hỏa Tốc", "callback_data": "BUY:voucherHoaToc"},
             ],
             [
                 {"text": "🎁 COMBO1 | Mã 100k + Ship HT 🔥", "callback_data": "BUY:combo1"}
@@ -664,38 +667,6 @@ def build_quick_buy_keyboard(cmd):
 # TOPUP HISTORY
 # =========================================================
 
-def topup_history_text(user_id):
-    if not SHEET_READY:
-        return "❌ Hệ thống Sheet đang lỗi"
-
-    try:
-        rows = ws_log.get_all_records()
-    except Exception:
-        return "❌ Không đọc được Logs"
-
-    logs = []
-    for r in rows:
-        uid = str(r.get("Tele ID", "") or r.get("user_id", ""))
-        action = str(r.get("action", "") or r.get("Hành động", ""))
-
-        if uid == str(user_id) and action in ("TOPUP", "TOPUP_CMD", "TOPUP_AUTO"):
-            logs.append(r)
-
-    logs = logs[-10:]  # 10 giao dịch gần nhất
-
-    if not logs:
-        return "📜 <b>Lịch sử nạp tiền</b>\nChưa có giao dịch nào."
-
-    out = ["📜 <b>Lịch sử nạp tiền (10 gần nhất)</b>"]
-
-    for r in logs:
-        time_ = r.get("time") or r.get("Thời gian") or ""
-        value = r.get("value") or r.get("Số tiền") or ""
-        note  = r.get("note") or r.get("Ghi chú") or ""
-
-        out.append(f"- {time_} | +{value} | {note}")
-
-    return "\n".join(out)
 
 
 def log_nap_tien(user_id, username, amount, loai="AUTO", tx_id="", note=""):
@@ -721,10 +692,6 @@ def log_nap_tien(user_id, username, amount, loai="AUTO", tx_id="", note=""):
         print("[NAP_TIEN_LOG_ERROR]", e)
 
 def topup_history_text(user_id, limit=10):
-    """
-    Lịch sử nạp tiền AUTO (Casso)
-    Đọc từ tab 'Nap Tien'
-    """
     if not SHEET_READY or ws_nap_tien is None:
         return "❌ Hệ thống lịch sử nạp tiền đang lỗi."
 
@@ -735,18 +702,15 @@ def topup_history_text(user_id, limit=10):
 
     logs = []
     for r in rows:
-        if (
-            str(r.get("Tele ID", "")) == str(user_id)
-            and str(r.get("loại", "")).upper() == "AUTO CASSO"
-        ):
+        if str(r.get("Tele ID", "")) == str(user_id):
             logs.append(r)
 
     if not logs:
-        return "📜 <b>Lịch sử nạp tiền</b>\nChưa có giao dịch nạp tự động."
+        return "📜 <b>Lịch sử nạp tiền</b>\nChưa có giao dịch nào."
 
     logs = logs[-limit:]
 
-    out = ["📜 <b>Lịch sử nạp tiền tự động (Casso)</b>"]
+    out = ["📜 <b>Lịch sử nạp tiền (PayFS)</b>"]
     for r in logs:
         out.append(
             f"- {r.get('time')} | "
@@ -1342,55 +1306,77 @@ def home():
     return "Bot is running", 200
 
 # =========================================================
-@app.route("/webhook-casso", methods=["POST", "GET"])
-def webhook_casso():
+# =========================================================
+# PAYFS / OPENBANKING WEBHOOK
+# =========================================================
+@app.route("/webhook-payfs", methods=["POST", "GET"])
+def webhook_payfs():
     if request.method == "GET":
         return "OK", 200
 
+    # ===== CHECK API KEY (BẮT BUỘC) =====
+    api_key = request.headers.get("X-Client-API-Key", "")
+    if api_key != PAYFS_API_KEY:
+        return "UNAUTHORIZED", 401
+
     data = request.get_json(force=True, silent=True) or {}
-    txs = data.get("data") or []
 
-    if isinstance(txs, dict):
-        txs = [txs]
+    # ---- PAYFS thường gửi 1 giao dịch / request ----
+    tx_id = str(
+        data.get("transaction_id")
+        or data.get("id")
+        or ""
+    )
 
-    for tx in txs:
-        tx_id = str(tx.get("id") or "")
-        amount = int(tx.get("amount") or 0)
-        desc = str(tx.get("description") or "")
+    amount = int(data.get("amount") or 0)
+    desc = str(
+        data.get("description")
+        or data.get("content")
+        or ""
+    )
 
-        if not tx_id or amount <= 0:
-            continue
-        if tx_id in SEEN_CASSO_TX_IDS:
-            continue
-        SEEN_CASSO_TX_IDS.add(tx_id)
+    if not tx_id or amount <= 0:
+        return "INVALID", 200
 
-        m = re.search(r"\bNAP\s+(\d+)\b", desc, re.I)
-        if not m:
-            continue
+    # ===== CHỐNG TRÙNG =====
+    if tx_id in SEEN_BILL_UNIQUE_IDS:
+        return "DUPLICATE", 200
+    SEEN_BILL_UNIQUE_IDS.add(tx_id)
 
-        user_id = int(m.group(1))
-        ensure_user_exists(user_id, "")
-        new_bal = add_balance(user_id, amount)
+    # ===== TÌM USER ID =====
+    m = re.search(r"\bNAP\s*(\d+)\b", desc, re.I)
+    if not m:
+        return "NO_USER", 200
 
-        # ===== GHI LỊCH SỬ NẠP TIỀN =====
-        log_nap_tien(
-                user_id=user_id,
-                username="",
-                amount=amount,
-                loai="CASSO",
-                tx_id=tx_id,
-                note="AUTO CASSO"
-        )
+    user_id = int(m.group(1))
 
-        log_row(user_id, "", "TOPUP_AUTO", amount, f"TX:{tx_id}")
+    ensure_user_exists(user_id, "")
+    new_bal = add_balance(user_id, amount)
 
+    # ===== GHI LỊCH SỬ NẠP =====
+    log_nap_tien(
+        user_id=user_id,
+        username="",
+        amount=amount,
+        loai="PAYFS",
+        tx_id=tx_id,
+        note="AUTO PAYFS"
+    )
 
-        tg_send(
-            user_id,
-            f"💰 <b>NẠP TIỀN THÀNH CÔNG</b>\n"
-            f"➕ {amount:,}đ\n"
-            f"💼 Số dư: {new_bal:,}đ"
-        )
+    log_row(
+        user_id,
+        "",
+        "TOPUP_AUTO",
+        amount,
+        f"PAYFS:{tx_id}"
+    )
+
+    tg_send(
+        user_id,
+        f"💰 <b>NẠP TIỀN THÀNH CÔNG</b>\n"
+        f"➕ {amount:,}đ\n"
+        f"💼 Số dư: <b>{new_bal:,}đ</b>"
+    )
 
     return "OK", 200
 
