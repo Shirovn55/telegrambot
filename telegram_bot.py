@@ -41,8 +41,10 @@ BOT_TOKEN  = os.getenv("TELEGRAM_TOKEN", "").strip()
 SHEET_ID   = os.getenv("GOOGLE_SHEET_ID", "").strip()
 CREDS_JSON = os.getenv("GOOGLE_SHEETS_CREDS_JSON", "").strip()
 ADMIN_ID   = int(os.getenv("ADMIN_TELEGRAM_ID", "0"))
-PAYFS_API_KEY = os.getenv("PAYFS_API_KEY", "").strip()
-PAYFS_WEBHOOK_SECRET = os.getenv("PAYFS_WEBHOOK_SECRET", "").strip()
+SEPAY_API_KEY = os.getenv("SEPAY_API_KEY", "").strip()
+SEPAY_WEBHOOK_SECRET = os.getenv("SEPAY_WEBHOOK_SECRET", "").strip()
+SEPAY_MERCHANT_ID = os.getenv("SEPAY_MERCHANT_ID", "").strip()
+SEPAY_QR_BASE = os.getenv("SEPAY_QR_BASE", "https://qr.sepay.vn").strip()
 
 
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
@@ -50,6 +52,42 @@ BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 QR_URL   = "https://img.vietqr.io/image/TPB-0819555000-compact.png"
 SAVE_URL = "https://shopee.vn/api/v2/voucher_wallet/save_vouchers"
 
+
+# =========================================================
+# TOPUP RULES (SEPAY)
+# =========================================================
+MIN_TOPUP_AMOUNT = 10000
+
+# (min_amount, bonus_percent) - sorted high -> low
+TOPUP_BONUS_RULES = [
+    (100000, 0.20),
+    (50000,  0.15),
+    (20000,  0.10),
+]
+
+def calc_topup_bonus(amount):
+    """Return (percent, bonus_amount) for a given topup amount."""
+    for min_amount, percent in TOPUP_BONUS_RULES:
+        if amount >= min_amount:
+            bonus = int(amount * percent)
+            return percent, bonus
+    return 0, 0
+
+def build_sepay_qr(user_id, amount=None):
+    """
+    Trả về QR tĩnh từ bank ICB (hoặc link đúng ảnh)
+    Nội dung CK: NAP <user_id>
+    """
+    base = "https://img.vietqr.io/image/ICB-101866911892-compact.png"
+
+    params = [
+        f"addInfo=NAP%20{user_id}"
+    ]
+
+    if amount:
+        params.insert(0, f"amount={int(amount)}")
+
+    return base + "?" + "&".join(params)
 
 # =========================================================
 # VIETQR (AUTO TOPUP)
@@ -548,7 +586,7 @@ def build_voucher_info_text():
         "━━━━━━━━━━━━━━━\n"
         "🟢 <b>Voucher đơn</b>\n"
         "• Mã 100k 0đ — 💰Giá 1.000 VNĐ\n"
-        "• Mã 50% Max 200k — 💰 Giá 1.000 VNĐ\ \n"
+        "• Mã 50% Max 200k — 💰Giá 1.000 VNĐ\ \n"
         "• Freeship Hỏa Tốc — 💰Giá 1.000 VNĐ\n\n"
         "🟣 <b>COMBO</b>\n"
         "• COMBO1: 100k/0đ + Freeship Hỏa Tốc\n"
@@ -560,7 +598,7 @@ def build_quick_voucher_keyboard():
         "inline_keyboard": [
             [
                 {"text": "💸 Mã 100k 0đ ", "callback_data": "BUY:voucher100k"},
-                {"text": "💸Mã 50% Max 200k", "callback_data": "BUY:voucher50max200"},
+                {"text": "💸 Mã 50% Max 200k", "callback_data": "BUY:voucher50max200"},
             ],
             [
                 {"text": "🚀 Freeship Hỏa Tốc", "callback_data": "BUY:voucherHoaToc"},
@@ -710,7 +748,7 @@ def topup_history_text(user_id, limit=10):
 
     logs = logs[-limit:]
 
-    out = ["📜 <b>Lịch sử nạp tiền (PayFS)</b>"]
+    out = ["📜 <b>Lịch sử nạp tiền (SEPAY)</b>"]
     for r in logs:
         out.append(
             f"- {r.get('time')} | "
@@ -905,7 +943,7 @@ def handle_admin_amount_input(admin_id, text):
 
     ensure_user_exists(uid, "")
     new_bal = add_balance(uid, amount)
-    update_topup_note(uid, amount, tx_id="BILL", description="Admin duyệt bill")
+
 
     if fu:
         SEEN_BILL_UNIQUE_IDS.add(fu)
@@ -1061,21 +1099,25 @@ def handle_update(update):
 
 
 
-    # ===== MENU: NẠP TIỀN (AUTO CASSO) =====
+    # ===== MENU: NẠP TIỀN (SEPAY - AUTO) =====
     if text == "💳 Nạp tiền":
         ensure_user_exists(user_id, username)
 
-        qr = build_vietqr_url(user_id)
+        qr = build_sepay_qr(user_id)
 
         tg_send_photo(
             chat_id,
             qr,
             caption=(
-                "💳 <b>NẠP TIỀN TỰ ĐỘNG</b>\n\n"
+                "💳 <b>NẠP TIỀN TỰ ĐỘNG (SEPAY)</b>\n\n"
                 "📌 <b>NỘI DUNG CK</b>\n"
                 f"<code>NAP {user_id}</code>\n\n"
-                "⚡ Chuyển xong đợi 1-3 phút hệ thống cộng tiền\n"
-                "❌ Không thấy tiền cộng inbox admin @BonBonxHPx"
+                "⚠️ <b>Nạp tối thiểu: 10.000đ</b>\n"
+                "🎁 <b>Ưu đãi:</b>\n"
+                "• ≥ 20k: +10%\n"
+                "• ≥ 50k: +15%\n"
+                "• ≥ 100k: +20%\n\n"
+                "⚡ Tiền vào là cộng ngay (0–30s)"
             )
         )
         return
@@ -1309,29 +1351,49 @@ def home():
 # =========================================================
 # PAYFS / OPENBANKING WEBHOOK
 # =========================================================
-@app.route("/webhook-payfs", methods=["POST", "GET"])
-def webhook_payfs():
+@app.route("/webhook-sepay", methods=["POST", "GET"])
+def webhook_sepay():
+    # Cho phép GET để test nhanh
     if request.method == "GET":
         return "OK", 200
 
-    # ===== CHECK API KEY (BẮT BUỘC) =====
-    api_key = request.headers.get("X-Client-API-Key", "")
-    if api_key != PAYFS_API_KEY:
-        return "UNAUTHORIZED", 401
+    # ===== VERIFY SIGNATURE (HMAC SHA256) =====
+    secret = (SEPAY_WEBHOOK_SECRET or "").strip()
+    raw_body = request.get_data() or b""
+
+    sig = (request.headers.get("X-Signature")
+           or request.headers.get("X-Sepay-Signature")
+           or request.headers.get("X-SEPAY-Signature")
+           or "").strip()
+
+    if secret:
+        expect = hmac.new(
+            secret.encode("utf-8"),
+            raw_body,
+            hashlib.sha256
+        ).hexdigest()
+
+        if sig.lower() != expect.lower():
+            return "INVALID_SIGNATURE", 401
+    else:
+        # Nếu bạn chưa set secret thì webhook sẽ bị hở -> vẫn chặn luôn cho an toàn
+        return "MISSING_WEBHOOK_SECRET", 401
 
     data = request.get_json(force=True, silent=True) or {}
 
-    # ---- PAYFS thường gửi 1 giao dịch / request ----
     tx_id = str(
         data.get("transaction_id")
         or data.get("id")
+        or data.get("tx_id")
         or ""
-    )
+    ).strip()
 
     amount = int(data.get("amount") or 0)
+
     desc = str(
-        data.get("description")
-        or data.get("content")
+        data.get("content")
+        or data.get("description")
+        or data.get("remark")
         or ""
     )
 
@@ -1343,40 +1405,71 @@ def webhook_payfs():
         return "DUPLICATE", 200
     SEEN_BILL_UNIQUE_IDS.add(tx_id)
 
-    # ===== TÌM USER ID =====
+    # ===== TÌM USER ID TRONG NỘI DUNG =====
     m = re.search(r"\bNAP\s*(\d+)\b", desc, re.I)
     if not m:
         return "NO_USER", 200
 
     user_id = int(m.group(1))
 
+    # ===== CHECK MIN TOPUP =====
+    if amount < MIN_TOPUP_AMOUNT:
+        tg_send(
+            user_id,
+            "❌ <b>Nạp tiền thất bại</b>\n"
+            f"💰 Số tiền tối thiểu là <b>{MIN_TOPUP_AMOUNT:,}đ</b>"
+        )
+        log_row(
+            user_id,
+            "",
+            "TOPUP_TOO_SMALL",
+            str(amount),
+            f"SEPAY:{tx_id}"
+        )
+        return "AMOUNT_TOO_SMALL", 200
+
+    # ===== TÍNH THƯỞNG =====
+    percent, bonus = calc_topup_bonus(amount)
+    total_add = amount + bonus
+
     ensure_user_exists(user_id, "")
-    new_bal = add_balance(user_id, amount)
+    new_bal = add_balance(user_id, total_add)
 
     # ===== GHI LỊCH SỬ NẠP =====
+    try:
+        note = f"+{int(percent*100)}%={bonus}" if bonus > 0 else ""
+    except Exception:
+        note = ""
+
     log_nap_tien(
         user_id=user_id,
         username="",
         amount=amount,
-        loai="PAYFS",
+        loai="SEPAY",
         tx_id=tx_id,
-        note="AUTO PAYFS"
+        note=note
     )
 
     log_row(
         user_id,
         "",
         "TOPUP_AUTO",
-        amount,
-        f"PAYFS:{tx_id}"
+        str(total_add),
+        f"SEPAY:{tx_id}"
     )
 
-    tg_send(
-        user_id,
-        f"💰 <b>NẠP TIỀN THÀNH CÔNG</b>\n"
-        f"➕ {amount:,}đ\n"
-        f"💼 Số dư: <b>{new_bal:,}đ</b>"
+    # ===== THÔNG BÁO USER =====
+    msg = (
+        "💰 <b>NẠP TIỀN THÀNH CÔNG</b>\n"
+        f"➕ Gốc: <b>{amount:,}đ</b>\n"
     )
+
+    if bonus > 0:
+        msg += f"🎁 Thưởng: <b>{bonus:,}đ</b> (+{int(percent*100)}%)\n"
+
+    msg += f"💼 Số dư: <b>{new_bal:,}đ</b>"
+
+    tg_send(user_id, msg)
 
     return "OK", 200
 
