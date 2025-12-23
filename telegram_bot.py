@@ -13,6 +13,7 @@ import hmac
 import hashlib
 from datetime import datetime
 from flask import Flask, request
+import urllib.parse
 
 # =========================================================
 # LOAD DOTENV (LOCAL SAFE)
@@ -74,20 +75,20 @@ def calc_topup_bonus(amount):
     return 0, 0
 
 def build_sepay_qr(user_id, amount=None):
-    """
-    Trả về QR tĩnh từ bank ICB (hoặc link đúng ảnh)
-    Nội dung CK: NAP <user_id>
-    """
-    base = "https://img.vietqr.io/image/ICB-101866911892-compact.png"
+    base = "https://qr.sepay.vn/img"
 
-    params = [
-        f"addInfo=NAP%20{user_id}"
-    ]
+    params = {
+        "acc": "101866911892",
+        "bank": "VietinBank",
+        "template": "compact",
+        "des": f"SEVQR NAP {user_id}"
+    }
 
     if amount:
-        params.insert(0, f"amount={int(amount)}")
+        params["amount"] = str(int(amount))
 
-    return base + "?" + "&".join(params)
+    return base + "?" + urllib.parse.urlencode(params)
+
 
 # =========================================================
 # VIETQR (AUTO TOPUP)
@@ -170,7 +171,7 @@ except Exception as e:
 PENDING_VOUCHER = {}         # user_id -> cmd
 PENDING_TOPUP   = {}         # user_id -> bill info
 WAIT_TOPUP_AMOUNT = {}       # admin_id -> waiting amount
-SEEN_BILL_UNIQUE_IDS = set()
+
 
 COMBO1_KEY = "combo1"
 
@@ -343,6 +344,45 @@ def log_row(user_id, username, action, value="", note=""):
 # =========================================================
 # USER / MONEY UTIL
 # =========================================================
+# =========================================================
+# TOPUP UNIQUE (ANTI DUPLICATE - VĨNH VIỄN)
+# =========================================================
+
+def is_tx_exists(tx_id):
+    """
+    Kiểm tra tx_id đã tồn tại trong tab 'Nap Tien' chưa
+    (cột F)
+    """
+    if not SHEET_READY or ws_nap_tien is None:
+        return False
+
+    try:
+        tx_list = ws_nap_tien.col_values(6)  # cột F = tx_id
+        return str(tx_id) in tx_list
+    except Exception as e:
+        print("[TX_CHECK_ERROR]", e)
+        return False
+
+
+def save_topup_to_sheet(user_id, username, amount, loai, tx_id, note=""):
+    """
+    Ghi lịch sử nạp tiền vào tab 'Nap Tien'
+    """
+    if not SHEET_READY or ws_nap_tien is None:
+        return
+
+    try:
+        ws_nap_tien.append_row([
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),  # time
+            str(user_id),                                 # Tele ID
+            username or "",                               # username
+            int(amount),                                  # số tiền
+            loai,                                         # loại
+            str(tx_id),                                   # tx_id
+            note                                          # nội dung
+        ])
+    except Exception as e:
+        print("[SAVE_TOPUP_ERROR]", e)
 
 
 def get_user_row(user_id):
@@ -1351,6 +1391,7 @@ def home():
 # =========================================================
 # PAYFS / OPENBANKING WEBHOOK
 # =========================================================
+
 @app.route("/webhook-sepay", methods=["POST", "GET"])
 def webhook_sepay():
     # Cho phép GET để test nhanh
@@ -1361,24 +1402,26 @@ def webhook_sepay():
     secret = (SEPAY_WEBHOOK_SECRET or "").strip()
     raw_body = request.get_data() or b""
 
-    sig = (request.headers.get("X-Signature")
-           or request.headers.get("X-Sepay-Signature")
-           or request.headers.get("X-SEPAY-Signature")
-           or "").strip()
+    sig = (
+        request.headers.get("X-Signature")
+        or request.headers.get("X-Sepay-Signature")
+        or request.headers.get("X-SEPAY-Signature")
+        or ""
+    ).strip()
 
-    if secret:
-        expect = hmac.new(
-            secret.encode("utf-8"),
-            raw_body,
-            hashlib.sha256
-        ).hexdigest()
-
-        if sig.lower() != expect.lower():
-            return "INVALID_SIGNATURE", 401
-    else:
-        # Nếu bạn chưa set secret thì webhook sẽ bị hở -> vẫn chặn luôn cho an toàn
+    if not secret:
         return "MISSING_WEBHOOK_SECRET", 401
 
+    expect = hmac.new(
+        secret.encode("utf-8"),
+        raw_body,
+        hashlib.sha256
+    ).hexdigest()
+
+    if sig.lower() != expect.lower():
+        return "INVALID_SIGNATURE", 401
+
+    # ===== PARSE DATA =====
     data = request.get_json(force=True, silent=True) or {}
 
     tx_id = str(
@@ -1400,12 +1443,12 @@ def webhook_sepay():
     if not tx_id or amount <= 0:
         return "INVALID", 200
 
-    # ===== CHỐNG TRÙNG =====
-    if tx_id in SEEN_BILL_UNIQUE_IDS:
+    # ===== CHỐNG TRÙNG VĨNH VIỄN =====
+    if is_tx_exists(tx_id):
+        print("[SEPAY] DUPLICATE TX:", tx_id)
         return "DUPLICATE", 200
-    SEEN_BILL_UNIQUE_IDS.add(tx_id)
 
-    # ===== TÌM USER ID TRONG NỘI DUNG =====
+    # ===== PARSE TELEGRAM USER ID =====
     m = re.search(r"\bNAP\s*(\d+)\b", desc, re.I)
     if not m:
         return "NO_USER", 200
@@ -1432,15 +1475,24 @@ def webhook_sepay():
     percent, bonus = calc_topup_bonus(amount)
     total_add = amount + bonus
 
+    # ===== CỘNG TIỀN =====
     ensure_user_exists(user_id, "")
     new_bal = add_balance(user_id, total_add)
 
-    # ===== GHI LỊCH SỬ NẠP =====
-    try:
-        note = f"+{int(percent*100)}%={bonus}" if bonus > 0 else ""
-    except Exception:
-        note = ""
+    # ===== NOTE (PHẢI TẠO TRƯỚC KHI GHI SHEET) =====
+    note = f"+{int(percent * 100)}%={bonus}" if bonus > 0 else ""
 
+    # ===== GHI TAB NAP TIEN (KHÓA TRÙNG) =====
+    save_topup_to_sheet(
+        user_id=user_id,
+        username="",
+        amount=amount,
+        loai="SEPAY",
+        tx_id=tx_id,
+        note=note
+    )
+
+    # ===== LOG HỆ THỐNG =====
     log_nap_tien(
         user_id=user_id,
         username="",
@@ -1465,14 +1517,13 @@ def webhook_sepay():
     )
 
     if bonus > 0:
-        msg += f"🎁 Thưởng: <b>{bonus:,}đ</b> (+{int(percent*100)}%)\n"
+        msg += f"🎁 Thưởng: <b>{bonus:,}đ</b> (+{int(percent * 100)}%)\n"
 
     msg += f"💼 Số dư: <b>{new_bal:,}đ</b>"
 
     tg_send(user_id, msg)
 
     return "OK", 200
-
 
 
 
