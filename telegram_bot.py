@@ -248,6 +248,21 @@ def tg_answer_callback(callback_id, text=None, show_alert=False):
         )
     except Exception as e:
         dprint("tg_answer_callback error:", e)
+def tg_send_html(chat_id, html):
+    payload = {
+        "chat_id": chat_id,
+        "text": html,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
+    }
+    try:
+        requests.post(
+            f"{BASE_URL}/sendMessage",
+            data=payload,
+            timeout=15
+        )
+    except Exception as e:
+        dprint("tg_send_html error:", e)
 
 # =========================================================
 # KEYBOARD
@@ -1115,6 +1130,26 @@ def handle_update(update):
                 "👋 <b>Chào mừng quay lại!</b>",
                 build_main_keyboard()
             )
+        return
+    # ===== ADMIN POST THÔNG BÁO =====
+    if text.startswith("/post") and user_id == ADMIN_ID:
+        content = text.replace("/post", "", 1).strip()
+
+        if not content:
+            tg_send(
+                chat_id,
+                "❌ Dùng:\n/post <nội dung thông báo>"
+            )
+            return
+
+        html = (
+            "📢 <b>THÔNG BÁO</b>\n"
+            "━━━━━━━━━━━━━━━\n"
+            f"{content}\n\n"
+            "⏰ <i>Cập nhật từ NgânMiu.Store</i>"
+        )
+
+        tg_send_html(chat_id, html)
         return
 
 
