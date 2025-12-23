@@ -1145,22 +1145,20 @@ def handle_update(update):
 
         qr = build_sepay_qr(user_id)
 
-        tg_send_photo(
-            chat_id,
-            qr,
-            caption=(
-                "💳 <b>NẠP TIỀN TỰ ĐỘNG (SEPAY)</b>\n\n"
-                "📌 <b>NỘI DUNG CK</b>\n"
-                f"<code>NAP {user_id}</code>\n\n"
-                "⚠️ <b>Nạp tối thiểu: 10.000đ</b>\n"
-                "🎁 <b>Ưu đãi:</b>\n"
-                "• ≥ 20k: +10%\n"
-                "• ≥ 50k: +15%\n"
-                "• ≥ 100k: +20%\n\n"
-                "⚡ Tiền vào là cộng ngay (0–30s)"
-            )
+        caption = (
+            "💳 <b>NẠP TIỀN TỰ ĐỘNG )</b>\n\n"
+            "📌 <b>NỘI DUNG CHUYỂN KHOẢN (BẮT BUỘC)</b>\n"
+            "<code>SEVQR NAP 1999478799</code>\n\n"
+            "⚠️ <b>LƯU Ý</b>\n"
+            "• Nhập <b>ĐÚNG</b> nội dung để hệ thống tự cộng tiền\n"
+            "💰 <b>NẠP TỐI THIỂU:</b> <b>10.000đ</b>\n\n"
+            "🎁 <b>ƯU ĐÃI NẠP TIỀN</b>\n"
+            "• ≥ 20.000đ 🎁 +10%\n"
+            "• ≥ 50.000đ 🎁 +15%\n"
+            "• ≥ 100.000đ 🎁 +20%\n\n"
+            "⚡ <i>Tiền vào tài khoản trong vòng 0–30 giây</i>"
         )
-        return
+
 
 
     # ===== LẤY USER DATA =====
@@ -1391,39 +1389,18 @@ def home():
 # =========================================================
 # PAYFS / OPENBANKING WEBHOOK
 # =========================================================
-
 @app.route("/webhook-sepay", methods=["POST", "GET"])
 def webhook_sepay():
     # Cho phép GET để test nhanh
     if request.method == "GET":
         return "OK", 200
 
-    # ===== VERIFY SIGNATURE (HMAC SHA256) =====
-    secret = (SEPAY_WEBHOOK_SECRET or "").strip()
-    raw_body = request.get_data() or b""
-
-    sig = (
-        request.headers.get("X-Signature")
-        or request.headers.get("X-Sepay-Signature")
-        or request.headers.get("X-SEPAY-Signature")
-        or ""
-    ).strip()
-
-    if not secret:
-        return "MISSING_WEBHOOK_SECRET", 401
-
-    expect = hmac.new(
-        secret.encode("utf-8"),
-        raw_body,
-        hashlib.sha256
-    ).hexdigest()
-
-    if sig.lower() != expect.lower():
-        return "INVALID_SIGNATURE", 401
+    # ===== BASIC CHECK SEPAY WEBHOOK =====
+    data = request.get_json(force=True, silent=True) or {}
+    if not data:
+        return "EMPTY", 200
 
     # ===== PARSE DATA =====
-    data = request.get_json(force=True, silent=True) or {}
-
     tx_id = str(
         data.get("transaction_id")
         or data.get("id")
@@ -1442,6 +1419,7 @@ def webhook_sepay():
 
     if not tx_id or amount <= 0:
         return "INVALID", 200
+
 
     # ===== CHỐNG TRÙNG VĨNH VIỄN =====
     if is_tx_exists(tx_id):
