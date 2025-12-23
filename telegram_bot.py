@@ -1146,11 +1146,12 @@ def handle_update(update):
         qr = build_sepay_qr(user_id)
 
         caption = (
-            "💳 <b>NẠP TIỀN TỰ ĐỘNG )</b>\n\n"
+            "💳 <b>NẠP TIỀN TỰ ĐỘNG (SEPAY)</b>\n\n"
             "📌 <b>NỘI DUNG CHUYỂN KHOẢN (BẮT BUỘC)</b>\n"
-            "<code>SEVQR NAP 1999478799</code>\n\n"
+            f"<code>SEVQR NAP {user_id}</code>\n\n"
             "⚠️ <b>LƯU Ý</b>\n"
             "• Nhập <b>ĐÚNG</b> nội dung để hệ thống tự cộng tiền\n"
+            "• Không sửa – không thêm ký tự khác\n\n"
             "💰 <b>NẠP TỐI THIỂU:</b> <b>10.000đ</b>\n\n"
             "🎁 <b>ƯU ĐÃI NẠP TIỀN</b>\n"
             "• ≥ 20.000đ 🎁 +10%\n"
@@ -1158,6 +1159,13 @@ def handle_update(update):
             "• ≥ 100.000đ 🎁 +20%\n\n"
             "⚡ <i>Tiền vào tài khoản trong vòng 0–30 giây</i>"
         )
+
+        tg_send_photo(
+            chat_id,
+            qr,
+            caption
+        )
+        return
 
 
 
