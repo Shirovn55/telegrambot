@@ -1399,56 +1399,65 @@ def home():
 # =========================================================
 @app.route("/webhook-sepay", methods=["POST", "GET"])
 def webhook_sepay():
+    # ===== CHO PHÉP GET TEST =====
     if request.method == "GET":
         return "OK", 200
 
-    # ===== BASIC CHECK (KHÔNG CHẶN) =====
+    # ===== BASIC CHECK (SEPAY KHÔNG RETRY NẾU 200) =====
     data = request.get_json(force=True, silent=True) or {}
     if not data:
         return "EMPTY", 200
 
-    # ===== PARSE TX =====
+    # ===== PARSE TX ID (SEPAY DÙNG id) =====
     tx_id = str(
-        data.get("transaction_id")
-        or data.get("id")
+        data.get("id")
+        or data.get("transaction_id")
         or data.get("tx_id")
-        or data.get("reference")
+        or data.get("referenceCode")
         or ""
     ).strip()
 
-    amount = int(
-        data.get("amount")
-        or data.get("amount_in")
-        or data.get("value")
-        or 0
-    )
+    # ===== PARSE AMOUNT (SEPAY DÙNG transferAmount) =====
+    try:
+        amount = int(
+            data.get("transferAmount")
+            or data.get("amount")
+            or data.get("amount_in")
+            or 0
+        )
+    except Exception:
+        amount = 0
 
-    # ===== LẤY NỘI DUNG CHUYỂN KHOẢN (FULL FALLBACK) =====
+    # ===== PARSE NỘI DUNG CHUYỂN KHOẢN =====
     desc = " ".join([
         str(data.get("content") or ""),
         str(data.get("description") or ""),
         str(data.get("remark") or ""),
-        str(data.get("note") or ""),
-        str(data.get("transfer_content") or "")
+        str(data.get("note") or "")
     ]).strip()
 
+    # ===== CHECK CƠ BẢN =====
     if not tx_id or amount <= 0:
+        print("[SEPAY] INVALID DATA:", data)
         return "INVALID", 200
 
-    # ===== CHỐNG TRÙNG VĨNH VIỄN =====
+    # ===== CHỐNG TRÙNG VĨNH VIỄN (TAB Nap Tien) =====
     if is_tx_exists(tx_id):
         print("[SEPAY] DUPLICATE TX:", tx_id)
         return "DUPLICATE", 200
 
-    # ===== PARSE USER ID (SEVQR NAP xxxx) =====
+    # ===== PARSE TELEGRAM USER ID =====
+    # BẮT:
+    #   SEVQR NAP 1999478799
+    #   NAP 1999478799
     m = re.search(r"(?:SEVQR\s*)?NAP\s*(\d{6,})", desc, re.I)
     if not m:
-        print("[SEPAY] NO USER IN DESC:", desc)
+        print("[SEPAY] NO USER FOUND | DESC =", desc)
         return "NO_USER", 200
 
     user_id = int(m.group(1))
 
-    # ===== CHECK MIN =====
+    # ===== CHECK NẠP TỐI THIỂU =====
     if amount < MIN_TOPUP_AMOUNT:
         tg_send(
             user_id,
@@ -1460,12 +1469,13 @@ def webhook_sepay():
     percent, bonus = calc_topup_bonus(amount)
     total_add = amount + bonus
 
+    # ===== CỘNG TIỀN =====
     ensure_user_exists(user_id, "")
-    new_bal = add_balance(user_id, total_add)
+    new_balance = add_balance(user_id, total_add)
 
-    note = f"+{int(percent*100)}%={bonus}" if bonus > 0 else ""
+    note = f"+{int(percent * 100)}%={bonus}" if bonus > 0 else ""
 
-    # ===== GHI NAP TIEN (KHÓA TRÙNG) =====
+    # ===== GHI TAB Nap Tien =====
     save_topup_to_sheet(
         user_id=user_id,
         username="",
@@ -1475,22 +1485,25 @@ def webhook_sepay():
         note=note
     )
 
+    # ===== LOG HỆ THỐNG =====
     log_row(
         user_id,
         "",
         "TOPUP_SEPAY",
         str(total_add),
-        f"{tx_id}"
+        tx_id
     )
 
-    # ===== THÔNG BÁO =====
+    # ===== THÔNG BÁO USER =====
     msg = (
         "💰 <b>NẠP TIỀN THÀNH CÔNG</b>\n"
         f"➕ Gốc: <b>{amount:,}đ</b>\n"
     )
+
     if bonus > 0:
         msg += f"🎁 Thưởng: <b>{bonus:,}đ</b>\n"
-    msg += f"💼 Số dư: <b>{new_bal:,}đ</b>"
+
+    msg += f"💼 Số dư: <b>{new_balance:,}đ</b>"
 
     tg_send(user_id, msg)
 
