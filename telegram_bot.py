@@ -12,10 +12,15 @@ import os
 import json
 import re
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from flask import Flask, request
 import urllib.parse
 import time
+
+# =========================================================
+# TIMEZONE VIETNAM (GMT+7)
+# =========================================================
+VIETNAM_TZ = timezone(timedelta(hours=7))
 
 # =========================================================
 # LOAD DOTENV
@@ -241,7 +246,12 @@ def build_main_keyboard():
 # UTIL
 # =========================================================
 def now_str():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    """Return current time in Vietnam timezone"""
+    return datetime.now(VIETNAM_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+def now_datetime():
+    """Return current datetime in Vietnam timezone"""
+    return datetime.now(VIETNAM_TZ)
 
 def log_row(user_id, username, action, value="", note=""):
     if not SHEET_READY:
@@ -323,9 +333,11 @@ def check_ban_status(user_id):
             try:
                 ban_until_str = note.split("BAN 1H:")[1].strip()
                 ban_until = datetime.strptime(ban_until_str, "%Y-%m-%d %H:%M")
+                # Make timezone-aware
+                ban_until = ban_until.replace(tzinfo=VIETNAM_TZ)
                 
                 # Check còn hiệu lực không
-                if datetime.now() < ban_until:
+                if now_datetime() < ban_until:
                     return {
                         "banned": True,
                         "type": "1H",
@@ -360,7 +372,7 @@ def apply_ban(user_id, ban_type):
         if ban_type == "PERMANENT":
             note = "BAN VĨNH VIỄN: Spam"
         else:
-            ban_until = datetime.now() + timedelta(seconds=BAN_DURATION_1H)
+            ban_until = now_datetime() + timedelta(seconds=BAN_DURATION_1H)
             note = f"BAN 1H: {ban_until.strftime('%Y-%m-%d %H:%M')}"
         
         ws_money.update_cell(row, 6, note)
@@ -461,7 +473,7 @@ def save_topup_to_sheet(user_id, username, amount, loai, tx_id, note=""):
 
     try:
         ws_nap_tien.append_row([
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            now_str(),  # Vietnam time
             str(user_id),
             username or "",
             int(amount),
