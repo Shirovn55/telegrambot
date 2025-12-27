@@ -264,7 +264,7 @@ def log_row(user_id, username, action, value="", note=""):
 # =========================================================
 # ✅ ANTI-SPAM SYSTEM
 # =========================================================
-def track_error(user_id):
+def track_error(user_id, username=""):
     """
     Track lỗi của user, return True nếu cần ban
     """
@@ -288,15 +288,18 @@ def track_error(user_id):
     if len(tracker["errors"]) >= SPAM_THRESHOLD:
         # Ban user
         ban_count = tracker["ban_count"]
+        error_count = len(tracker["errors"])
         
         if ban_count == 0:
             # Lần đầu → Ban 1H
             apply_ban(user_id, "1H")
+            notify_admin_spam(user_id, username, "1H", error_count)
             tracker["ban_count"] = 1
             return True
         else:
             # Tái phạm → Ban vĩnh viễn
             apply_ban(user_id, "PERMANENT")
+            notify_admin_spam(user_id, username, "PERMANENT", error_count)
             return True
     
     return False
@@ -355,6 +358,53 @@ def check_ban_status(user_id):
     except Exception as e:
         dprint("check_ban_status error:", e)
         return {"banned": False}
+
+def notify_admin_spam(user_id, username, ban_type, error_count):
+    """
+    Gửi cảnh báo spam cho admin
+    """
+    if not ADMIN_ID or ADMIN_ID == 0:
+        return
+    
+    try:
+        # Lấy thông tin user
+        row, balance, status = get_user_data(user_id)
+        
+        # Format ban info
+        if ban_type == "PERMANENT":
+            ban_text = "🔨 Hành động: Ban vĩnh viễn"
+            time_text = "⏰ Thời gian: Vĩnh viễn"
+        else:
+            ban_until = now_datetime() + timedelta(seconds=BAN_DURATION_1H)
+            ban_text = "🔨 Hành động: Ban 1 giờ"
+            time_text = f"⏰ Hết hạn: {ban_until.strftime('%Y-%m-%d %H:%M')}"
+        
+        # Format username
+        if username:
+            user_info = f"@{username}"
+        else:
+            user_info = f"ID: {user_id}"
+        
+        # Build message
+        msg = (
+            "🚨 <b>CẢNH BÁO SPAM</b>\n\n"
+            f"👤 User: {user_info}\n"
+            f"📱 Tele ID: <code>{user_id}</code>\n"
+            f"⚠️ Số lỗi: <b>{error_count} lỗi trong 60 giây</b>\n\n"
+            f"{ban_text}\n"
+            f"{time_text}\n\n"
+            "━━━━━━━━━━━━━━━\n"
+            "📊 <b>Chi tiết:</b>\n"
+            f"• Balance: {balance:,}đ\n"
+            f"• Status: {status}\n\n"
+            f"🔗 <a href='tg://user?id={user_id}'>Link user</a>"
+        )
+        
+        tg_send(ADMIN_ID, msg)
+        dprint(f"✅ Sent spam alert to admin: {user_id}")
+        
+    except Exception as e:
+        dprint("notify_admin_spam error:", e)
 
 def apply_ban(user_id, ban_type):
     """
@@ -811,6 +861,13 @@ def handle_update(update):
     user_id = msg["from"]["id"]
     username = msg["from"].get("username", "")
     text = (msg.get("text") or "").strip()
+    
+    # ✅ Skip messages không có text (ảnh, sticker, voice...)
+    # Chỉ xử lý các message quan trọng không cần text
+    if not text:
+        # Cho phép qua nếu đang chờ cookie (user có thể gửi nhầm ảnh)
+        if user_id not in PENDING_VOUCHER:
+            return
 
     # ===== /start =====
     if text == "/start":
@@ -836,7 +893,7 @@ def handle_update(update):
             except Exception as e:
                 dprint("/start error:", e)
                 # ✅ Track lỗi
-                if track_error(user_id):
+                if track_error(user_id, username):
                     tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
         else:
             tg_send(chat_id, "👋 <b>Chào mừng quay lại!</b>", build_main_keyboard())
@@ -849,7 +906,7 @@ def handle_update(update):
         if not ok:
             tg_send(chat_id, result)
             # ✅ Track lỗi
-            if track_error(user_id):
+            if track_error(user_id, username):
                 tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
             return
 
@@ -1014,7 +1071,14 @@ def handle_update(update):
         return
 
     # ===== LỆNH /voucherxxx <cookie> =====
+    # Skip nếu không có text (ví dụ: user gửi ảnh, sticker...)
+    if not text:
+        return
+    
     parts = text.split(maxsplit=1)
+    if not parts:
+        return
+    
     cmd = parts[0].replace("/", "")
     cookie = parts[1] if len(parts) > 1 else ""
 
