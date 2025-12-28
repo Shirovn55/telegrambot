@@ -253,56 +253,6 @@ def now_datetime():
     """Return current datetime in Vietnam timezone"""
     return datetime.now(VIETNAM_TZ)
 
-def get_all_user_ids():
-    """Lấy tất cả user_id từ sheet Thanh Toan"""
-    if not SHEET_READY:
-        return []
-    try:
-        all_values = ws_money.get_all_values()
-        user_ids = []
-        for row in all_values[1:]:  # Skip header
-            if row and row[0]:  # Có user_id
-                try:
-                    user_id = int(row[0])
-                    if user_id not in user_ids:
-                        user_ids.append(user_id)
-                except:
-                    continue
-        return user_ids
-    except Exception as e:
-        dprint("get_all_user_ids error:", e)
-        return []
-
-def broadcast_message(message, exclude_admin=False):
-    """Gửi thông báo đến tất cả user"""
-    user_ids = get_all_user_ids()
-    
-    if not user_ids:
-        return 0, 0
-    
-    success = 0
-    failed = 0
-    
-    for user_id in user_ids:
-        # Bỏ qua admin nếu cần
-        if exclude_admin and user_id == ADMIN_ID:
-            continue
-            
-        try:
-            # Format thông báo đẹp
-            broadcast_text = f"📢 <b>THÔNG BÁO TỪ BOT</b>\n\n{message}"
-            tg_send(user_id, broadcast_text)
-            success += 1
-            # Tránh spam Telegram API
-            time.sleep(0.05)  # 50ms delay giữa mỗi tin nhắn
-        except Exception as e:
-            dprint(f"Broadcast failed for {user_id}:", e)
-            failed += 1
-    
-    return success, failed
-
-
-
 def log_row(user_id, username, action, value="", note=""):
     if not SHEET_READY:
         return
@@ -918,46 +868,6 @@ def handle_update(update):
         # Cho phép qua nếu đang chờ cookie (user có thể gửi nhầm ảnh)
         if user_id not in PENDING_VOUCHER:
             return
-
-    # ===== ADMIN: /thongbao =====
-    if text and text.startswith("/thongbao"):
-        # Chỉ admin mới được dùng
-        if user_id != ADMIN_ID:
-            tg_send(chat_id, "⛔ Lệnh này chỉ dành cho Admin")
-            return
-        
-        parts = text.split(maxsplit=1)
-        if len(parts) < 2:
-            tg_send(
-                chat_id,
-                "📢 <b>HƯỚNG DẪN BROADCAST</b>\n\n"
-                "Sử dụng: <code>/thongbao [nội dung]</code>\n\n"
-                "Ví dụ:\n"
-                "<code>/thongbao Đêm qua server bị lỗi dẫn tới bot không hoạt động, "
-                "Hiện tại BOT đã hoạt động bình thường trở lại.</code>"
-            )
-            return
-        
-        message = parts[1].strip()
-        
-        # Gửi thông báo xác nhận
-        tg_send(chat_id, "⏳ <b>Đang gửi thông báo...</b>")
-        
-        # Broadcast
-        success, failed = broadcast_message(message, exclude_admin=False)
-        
-        # Log
-        log_row(user_id, username, "BROADCAST", str(success), message[:50])
-        
-        # Thông báo kết quả
-        tg_send(
-            chat_id,
-            f"✅ <b>ĐÃ GỬI THÔNG BÁO</b>\n\n"
-            f"👥 Thành công: <b>{success}</b> người\n"
-            f"❌ Thất bại: <b>{failed}</b> người"
-        )
-        return
-
 
     # ===== /start =====
     if text == "/start":
