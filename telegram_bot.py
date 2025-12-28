@@ -103,6 +103,7 @@ def dprint(*args):
 # GOOGLE SHEET CONNECT WITH RETRY
 # =========================================================
 SHEET_READY = False
+sh          = None  # ✅ Spreadsheet object (for BroadcastState sheet)
 ws_money    = None
 ws_voucher  = None
 ws_log      = None
@@ -183,6 +184,17 @@ COMBO1_KEY = "combo1"
 # ✅ SPAM TRACKER (in-memory, sync to sheet on ban)
 SPAM_TRACKER = {}  # user_id -> {"errors": [timestamp], "ban_count": 0}
 
+# ✅ BROADCAST COOLDOWN (tránh spam broadcast)
+LAST_BROADCAST_TIME = None  # timestamp of last broadcast
+BROADCAST_COOLDOWN = 60  # seconds - chỉ cho phép broadcast mỗi 60s (tăng từ 30s)
+
+# ✅ MESSAGE DEDUPLICATION (tránh xử lý cùng message nhiều lần)
+PROCESSED_MESSAGES = set()  # Lưu message_id đã xử lý
+MAX_PROCESSED_MESSAGES = 1000  # Giới hạn số message lưu trong memory
+
+# ✅ BROADCAST LOCK (đang broadcast thì không cho broadcast nữa)
+IS_BROADCASTING = False
+
 # =========================================================
 # TELEGRAM UTIL
 # =========================================================
@@ -252,6 +264,148 @@ def now_str():
 def now_datetime():
     """Return current datetime in Vietnam timezone"""
     return datetime.now(VIETNAM_TZ)
+
+def get_all_user_ids():
+    """Lấy tất cả user_id từ sheet Thanh Toan"""
+    if not SHEET_READY:
+        return []
+    try:
+        all_values = ws_money.get_all_values()
+        user_ids = set()  # ✅ Dùng set() tự động loại duplicate
+        for row in all_values[1:]:  # Skip header
+            if row and row[0]:  # Có user_id
+                try:
+                    user_id = int(row[0])
+                    user_ids.add(user_id)  # ✅ add() thay vì append()
+                except:
+                    continue
+        
+        result = list(user_ids)  # Convert về list
+        dprint(f"📊 Found {len(result)} unique users")  # ✅ Debug log
+        return result
+    except Exception as e:
+        dprint("get_all_user_ids error:", e)
+        return []
+
+def broadcast_message(message, exclude_admin=False):
+    """Gửi thông báo đến tất cả user"""
+    user_ids = get_all_user_ids()
+    
+    if not user_ids:
+        dprint("❌ No users found for broadcast")
+        return 0, 0
+    
+    dprint(f"📢 Starting broadcast to {len(user_ids)} users...")
+    
+    success = 0
+    failed = 0
+    sent_to = set()  # ✅ Track user đã gửi để tránh duplicate
+    
+    for user_id in user_ids:
+        # ✅ Skip nếu đã gửi cho user này rồi
+        if user_id in sent_to:
+            dprint(f"⚠️ Skipping duplicate user_id: {user_id}")
+            continue
+            
+        # Bỏ qua admin nếu cần
+        if exclude_admin and user_id == ADMIN_ID:
+            continue
+            
+        try:
+            # Format thông báo đẹp
+            broadcast_text = f"📢 <b>THÔNG BÁO TỪ BOT</b>\n\n{message}"
+            tg_send(user_id, broadcast_text)
+            sent_to.add(user_id)  # ✅ Đánh dấu đã gửi
+            success += 1
+            # Tránh spam Telegram API
+            time.sleep(0.05)  # 50ms delay giữa mỗi tin nhắn
+        except Exception as e:
+            dprint(f"❌ Broadcast failed for {user_id}:", e)
+            failed += 1
+    
+    dprint(f"✅ Broadcast completed: {success} success, {failed} failed")
+    return success, failed
+
+
+
+
+# =========================================================
+# SHEET-BASED STATE (for serverless)
+# =========================================================
+def get_broadcast_sheet():
+    """Get or create BroadcastState sheet"""
+    if not SHEET_READY:
+        return None
+    try:
+        try:
+            return sh.worksheet("BroadcastState")
+        except:
+            ws = sh.add_worksheet("BroadcastState", 100, 4)
+            ws.update('A1:D1', [['Timestamp', 'AdminID', 'Status', 'MessageID']])
+            return ws
+    except Exception as e:
+        dprint(f"get_broadcast_sheet error: {e}")
+        return None
+
+def get_last_broadcast_time_from_sheet():
+    """Lấy thời gian broadcast gần nhất từ sheet"""
+    ws = get_broadcast_sheet()
+    if not ws:
+        return None
+    try:
+        all_values = ws.get_all_values()
+        if len(all_values) <= 1:  # Chỉ có header
+            return None
+        
+        # Tìm broadcast STARTED/COMPLETED gần nhất
+        for row in reversed(all_values[1:]):  # Skip header, đọc ngược
+            if row[2] in ["STARTED", "COMPLETED"]:
+                timestamp_str = row[0]
+                # Parse: "2024-12-28 16:46:00"
+                dt = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+                # Convert to Vietnam timezone timestamp
+                return dt.replace(tzinfo=VIETNAM_TZ).timestamp()
+        
+        return None
+    except Exception as e:
+        dprint(f"get_last_broadcast_time_from_sheet error: {e}")
+        return None
+
+def set_broadcast_state_to_sheet(admin_id, status, message_id=""):
+    """Lưu broadcast state vào sheet"""
+    ws = get_broadcast_sheet()
+    if not ws:
+        return False
+    try:
+        ws.append_row([
+            now_str(),
+            str(admin_id),
+            status,
+            str(message_id)
+        ])
+        dprint(f"📝 Broadcast state saved: {status}")
+        return True
+    except Exception as e:
+        dprint(f"set_broadcast_state_to_sheet error: {e}")
+        return False
+
+def check_broadcast_cooldown_from_sheet():
+    """Check cooldown từ sheet"""
+    last_time = get_last_broadcast_time_from_sheet()
+    if not last_time:
+        return True, 0  # OK to broadcast
+    
+    current_time = time.time()
+    time_since_last = current_time - last_time
+    
+    dprint(f"⏱️ Time since last broadcast: {time_since_last:.1f}s")
+    
+    if time_since_last < BROADCAST_COOLDOWN:
+        wait_time = int(BROADCAST_COOLDOWN - time_since_last)
+        return False, wait_time
+    
+    return True, 0
+
 
 def log_row(user_id, username, action, value="", note=""):
     if not SHEET_READY:
@@ -687,7 +841,6 @@ def build_voucher_info_text():
         "🟢 <b>Voucher đơn</b>\n"
         "• Mã 100k 0đ — 💰Giá 1.000 VNĐ\n"
         "• Mã 50% Max 200k — 💰Giá 1.000 VNĐ\n"
-        "• Mã 50% Max 100k — 💰Giá 1.000 VNĐ\n"
         "• Freeship Hỏa Tốc — 💰Giá 1.000 VNĐ\n\n"
         "🟣 <b>COMBO</b>\n"
         "• COMBO1: 100k/0đ + Freeship Hỏa Tốc\n"
@@ -703,8 +856,7 @@ def build_quick_voucher_keyboard():
                 {"text": "💸 Mã 50% Max 200k", "callback_data": "BUY:voucher50max200"},
             ],
             [
-                {"text": "🚀 Freeship HT", "callback_data": "BUY:voucherHoaToc"},
-                {"text": "💸 Mã 50% Max 100k", "callback_data": "BUY:voucher50max100"},
+                {"text": "🚀 Freeship Hỏa Tốc", "callback_data": "BUY:voucherHoaToc"},
             ],
             [
                 {"text": "🎁 COMBO1 | Mã 100k + Ship HT 🔥", "callback_data": "BUY:combo1"}
@@ -716,7 +868,6 @@ def build_quick_buy_keyboard(cmd):
     MAP = {
         "voucher100k": "💸 Mã 100k 0đ",
         "voucher50max200": "💸 Mã 50% max 200k 0đ",
-        "voucher50max200": "💸 Mã 50% max 100k 0đ",
         "voucherHoaToc": "🚀 Freeship Hỏa Tốc",
         "combo1": "🎁 COMBO1 – Mã 100k + Ship HT 🔥"
     }
@@ -802,6 +953,31 @@ def handle_callback_query(cb):
 # =========================================================
 def handle_update(update):
     dprint("UPDATE:", update)
+    
+    # ✅ MESSAGE DEDUPLICATION - Tránh xử lý cùng message nhiều lần
+    global PROCESSED_MESSAGES
+    msg = update.get("message", {})
+    message_id = msg.get("message_id")
+    
+    if message_id:
+        # Tạo unique key: chat_id + message_id
+        chat_id = msg.get("chat", {}).get("id")
+        msg_key = f"{chat_id}_{message_id}"
+        
+        if msg_key in PROCESSED_MESSAGES:
+            dprint(f"⚠️ DUPLICATE MESSAGE DETECTED: {msg_key} - SKIPPING")
+            return  # ✅ BỎ QUA message duplicate
+        
+        # Thêm vào set
+        PROCESSED_MESSAGES.add(msg_key)
+        
+        # Giới hạn memory: nếu quá 1000 messages, xóa cũ
+        if len(PROCESSED_MESSAGES) > MAX_PROCESSED_MESSAGES:
+            # Convert to list, xóa 100 message cũ nhất
+            old_msgs = list(PROCESSED_MESSAGES)[:100]
+            for old_msg in old_msgs:
+                PROCESSED_MESSAGES.discard(old_msg)
+            dprint(f"🗑️ Cleaned {len(old_msgs)} old messages from cache")
 
     # ✅ CHECK SHEET_READY
     if not SHEET_READY:
@@ -871,6 +1047,83 @@ def handle_update(update):
         # Cho phép qua nếu đang chờ cookie (user có thể gửi nhầm ảnh)
         if user_id not in PENDING_VOUCHER:
             return
+
+    # ===== ADMIN: /thongbao =====
+    if text and text.startswith("/thongbao"):
+        # Chỉ admin mới được dùng
+        if user_id != ADMIN_ID:
+            tg_send(chat_id, "⛔ Lệnh này chỉ dành cho Admin")
+            return
+        
+        # ✅ Lấy message_id
+        message_id = msg.get("message_id", 0)
+        
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            tg_send(
+                chat_id,
+                "📢 <b>HƯỚNG DẪN BROADCAST</b>\n\n"
+                "Sử dụng: <code>/thongbao [nội dung]</code>\n\n"
+                "Ví dụ:\n"
+                "<code>/thongbao Đêm qua server bị lỗi dẫn tới bot không hoạt động, "
+                "Hiện tại BOT đã hoạt động bình thường trở lại.</code>"
+            )
+            return
+        
+        # ✅ CHECK COOLDOWN từ SHEET (serverless-compatible)
+        can_broadcast, wait_time = check_broadcast_cooldown_from_sheet()
+        if not can_broadcast:
+            tg_send(
+                chat_id,
+                f"⏳ <b>VUI LÒNG ĐỢI {wait_time}s</b>\n\n"
+                f"⛔ Broadcast gần đây: {BROADCAST_COOLDOWN - wait_time}s trước\n"
+                f"🔒 Cần đợi thêm: {wait_time}s\n\n"
+                f"<i>Điều này giúp tránh spam và bảo vệ bot.</i>"
+            )
+            dprint(f"⏳ COOLDOWN BLOCKED by sheet: wait {wait_time}s")
+            return
+        
+        message = parts[1].strip()
+        
+        # ✅ LƯU STATE VÀO SHEET NGAY LẬP TỨC
+        if not set_broadcast_state_to_sheet(user_id, "STARTED", message_id):
+            tg_send(chat_id, "❌ Lỗi khi lưu state, vui lòng thử lại")
+            return
+        dprint(f"📝 Broadcast state STARTED saved to sheet")
+        
+        # ✅ GỬI PHẢN HỒI NGAY LẬP TỨC
+        tg_send(
+            chat_id, 
+            "✅ <b>ĐÃ NHẬN LỆNH BROADCAST</b>\n\n"
+            "⏳ Đang chuẩn bị gửi thông báo...\n"
+            "📊 Sẽ báo cáo kết quả sau khi hoàn thành."
+        )
+        
+        try:
+            # Broadcast
+            dprint(f"🔔 Admin {user_id} broadcasting: {message[:30]}...")
+            success, failed = broadcast_message(message, exclude_admin=False)
+            
+            # Log
+            log_row(user_id, username, "BROADCAST", str(success), message[:50])
+            
+            # ✅ LƯU STATE COMPLETED VÀO SHEET
+            set_broadcast_state_to_sheet(user_id, "COMPLETED", message_id)
+            
+            # Thông báo kết quả
+            tg_send(
+                chat_id,
+                f"✅ <b>ĐÃ GỬI THÔNG BÁO</b>\n\n"
+                f"👥 Thành công: <b>{success}</b> người\n"
+                f"❌ Thất bại: <b>{failed}</b> người"
+            )
+        except Exception as e:
+            dprint(f"❌ Broadcast error: {e}")
+            set_broadcast_state_to_sheet(user_id, "FAILED", message_id)
+            tg_send(chat_id, f"❌ Lỗi khi broadcast: {str(e)}")
+        
+        return
+
 
     # ===== /start =====
     if text == "/start":
