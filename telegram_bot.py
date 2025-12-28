@@ -183,6 +183,17 @@ COMBO1_KEY = "combo1"
 # ✅ SPAM TRACKER (in-memory, sync to sheet on ban)
 SPAM_TRACKER = {}  # user_id -> {"errors": [timestamp], "ban_count": 0}
 
+# ✅ BROADCAST COOLDOWN (tránh spam broadcast)
+LAST_BROADCAST_TIME = None  # timestamp of last broadcast
+BROADCAST_COOLDOWN = 60  # seconds - chỉ cho phép broadcast mỗi 60s (tăng từ 30s)
+
+# ✅ MESSAGE DEDUPLICATION (tránh xử lý cùng message nhiều lần)
+PROCESSED_MESSAGES = set()  # Lưu message_id đã xử lý
+MAX_PROCESSED_MESSAGES = 1000  # Giới hạn số message lưu trong memory
+
+# ✅ BROADCAST LOCK (đang broadcast thì không cho broadcast nữa)
+IS_BROADCASTING = False
+
 # =========================================================
 # TELEGRAM UTIL
 # =========================================================
@@ -252,6 +263,69 @@ def now_str():
 def now_datetime():
     """Return current datetime in Vietnam timezone"""
     return datetime.now(VIETNAM_TZ)
+
+def get_all_user_ids():
+    """Lấy tất cả user_id từ sheet Thanh Toan"""
+    if not SHEET_READY:
+        return []
+    try:
+        all_values = ws_money.get_all_values()
+        user_ids = set()  # ✅ Dùng set() tự động loại duplicate
+        for row in all_values[1:]:  # Skip header
+            if row and row[0]:  # Có user_id
+                try:
+                    user_id = int(row[0])
+                    user_ids.add(user_id)  # ✅ add() thay vì append()
+                except:
+                    continue
+        
+        result = list(user_ids)  # Convert về list
+        dprint(f"📊 Found {len(result)} unique users")  # ✅ Debug log
+        return result
+    except Exception as e:
+        dprint("get_all_user_ids error:", e)
+        return []
+
+def broadcast_message(message, exclude_admin=False):
+    """Gửi thông báo đến tất cả user"""
+    user_ids = get_all_user_ids()
+    
+    if not user_ids:
+        dprint("❌ No users found for broadcast")
+        return 0, 0
+    
+    dprint(f"📢 Starting broadcast to {len(user_ids)} users...")
+    
+    success = 0
+    failed = 0
+    sent_to = set()  # ✅ Track user đã gửi để tránh duplicate
+    
+    for user_id in user_ids:
+        # ✅ Skip nếu đã gửi cho user này rồi
+        if user_id in sent_to:
+            dprint(f"⚠️ Skipping duplicate user_id: {user_id}")
+            continue
+            
+        # Bỏ qua admin nếu cần
+        if exclude_admin and user_id == ADMIN_ID:
+            continue
+            
+        try:
+            # Format thông báo đẹp
+            broadcast_text = f"📢 <b>THÔNG BÁO TỪ BOT</b>\n\n{message}"
+            tg_send(user_id, broadcast_text)
+            sent_to.add(user_id)  # ✅ Đánh dấu đã gửi
+            success += 1
+            # Tránh spam Telegram API
+            time.sleep(0.05)  # 50ms delay giữa mỗi tin nhắn
+        except Exception as e:
+            dprint(f"❌ Broadcast failed for {user_id}:", e)
+            failed += 1
+    
+    dprint(f"✅ Broadcast completed: {success} success, {failed} failed")
+    return success, failed
+
+
 
 def log_row(user_id, username, action, value="", note=""):
     if not SHEET_READY:
@@ -799,6 +873,31 @@ def handle_callback_query(cb):
 # =========================================================
 def handle_update(update):
     dprint("UPDATE:", update)
+    
+    # ✅ MESSAGE DEDUPLICATION - Tránh xử lý cùng message nhiều lần
+    global PROCESSED_MESSAGES
+    msg = update.get("message", {})
+    message_id = msg.get("message_id")
+    
+    if message_id:
+        # Tạo unique key: chat_id + message_id
+        chat_id = msg.get("chat", {}).get("id")
+        msg_key = f"{chat_id}_{message_id}"
+        
+        if msg_key in PROCESSED_MESSAGES:
+            dprint(f"⚠️ DUPLICATE MESSAGE DETECTED: {msg_key} - SKIPPING")
+            return  # ✅ BỎ QUA message duplicate
+        
+        # Thêm vào set
+        PROCESSED_MESSAGES.add(msg_key)
+        
+        # Giới hạn memory: nếu quá 1000 messages, xóa cũ
+        if len(PROCESSED_MESSAGES) > MAX_PROCESSED_MESSAGES:
+            # Convert to list, xóa 100 message cũ nhất
+            old_msgs = list(PROCESSED_MESSAGES)[:100]
+            for old_msg in old_msgs:
+                PROCESSED_MESSAGES.discard(old_msg)
+            dprint(f"🗑️ Cleaned {len(old_msgs)} old messages from cache")
 
     # ✅ CHECK SHEET_READY
     if not SHEET_READY:
@@ -868,6 +967,94 @@ def handle_update(update):
         # Cho phép qua nếu đang chờ cookie (user có thể gửi nhầm ảnh)
         if user_id not in PENDING_VOUCHER:
             return
+
+    # ===== ADMIN: /thongbao =====
+    if text and text.startswith("/thongbao"):
+        # Chỉ admin mới được dùng
+        if user_id != ADMIN_ID:
+            tg_send(chat_id, "⛔ Lệnh này chỉ dành cho Admin")
+            return
+        
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            tg_send(
+                chat_id,
+                "📢 <b>HƯỚNG DẪN BROADCAST</b>\n\n"
+                "Sử dụng: <code>/thongbao [nội dung]</code>\n\n"
+                "Ví dụ:\n"
+                "<code>/thongbao Đêm qua server bị lỗi dẫn tới bot không hoạt động, "
+                "Hiện tại BOT đã hoạt động bình thường trở lại.</code>"
+            )
+            return
+        
+        # ✅ CHECK COOLDOWN - tránh spam broadcast
+        global LAST_BROADCAST_TIME, IS_BROADCASTING
+        current_time = time.time()
+        if LAST_BROADCAST_TIME:
+            time_since_last = current_time - LAST_BROADCAST_TIME
+            if time_since_last < BROADCAST_COOLDOWN:
+                wait_time = int(BROADCAST_COOLDOWN - time_since_last)
+                tg_send(
+                    chat_id,
+                    f"⏳ <b>VUI LÒNG ĐỢI {wait_time}s</b>\n\n"
+                    f"⛔ Broadcast gần đây: {int(time_since_last)}s trước\n"
+                    f"🔒 Cần đợi thêm: {wait_time}s\n\n"
+                    f"<i>Điều này giúp tránh spam và bảo vệ bot.</i>"
+                )
+                dprint(f"⏳ COOLDOWN BLOCKED: {time_since_last:.1f}s < {BROADCAST_COOLDOWN}s")
+                return
+        
+        # ✅ CHECK BROADCAST LOCK - đang broadcast thì không cho gửi nữa
+        if IS_BROADCASTING:
+            tg_send(
+                chat_id,
+                "⏳ <b>ĐANG CÓ BROADCAST ĐANG CHẠY</b>\n\n"
+                "🔒 Vui lòng đợi broadcast hiện tại hoàn thành.\n\n"
+                "<i>Thường mất 30-60 giây tùy số lượng user.</i>"
+            )
+            dprint(f"⚠️ BROADCAST LOCKED - Another broadcast in progress")
+            return
+        
+        # ✅ SET LAST_BROADCAST_TIME NGAY LẬP TỨC (trước khi broadcast)
+        LAST_BROADCAST_TIME = current_time
+        dprint(f"⏰ COOLDOWN TIMER STARTED at {current_time}")
+        
+        message = parts[1].strip()
+        
+        # ✅ GỬI PHẢN HỒI NGAY LẬP TỨC (trước khi set lock)
+        tg_send(
+            chat_id, 
+            "✅ <b>ĐÃ NHẬN LỆNH BROADCAST</b>\n\n"
+            "⏳ Đang chuẩn bị gửi thông báo...\n"
+            "📊 Sẽ báo cáo kết quả sau khi hoàn thành."
+        )
+        
+        # ✅ SET BROADCAST LOCK
+        IS_BROADCASTING = True
+        dprint(f"🔒 BROADCAST LOCK ACQUIRED by admin {user_id}")
+        
+        try:
+            # Broadcast
+            dprint(f"🔔 Admin {user_id} broadcasting: {message[:30]}...")
+            success, failed = broadcast_message(message, exclude_admin=False)
+            
+            # Log
+            log_row(user_id, username, "BROADCAST", str(success), message[:50])
+            
+            # Thông báo kết quả
+            tg_send(
+                chat_id,
+                f"✅ <b>ĐÃ GỬI THÔNG BÁO</b>\n\n"
+                f"👥 Thành công: <b>{success}</b> người\n"
+                f"❌ Thất bại: <b>{failed}</b> người"
+            )
+        finally:
+            # ✅ RELEASE BROADCAST LOCK
+            IS_BROADCASTING = False
+            dprint(f"🔓 BROADCAST LOCK RELEASED")
+        
+        return
+
 
     # ===== /start =====
     if text == "/start":
