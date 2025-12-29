@@ -1126,6 +1126,7 @@ def handle_update(update):
 
         # ✅ LƯU STATE STARTED (để chống retry / resend)
         if not set_broadcast_state_to_sheet(user_id, "STARTED", message_id):
+            IS_BROADCASTING = False 
             tg_send(chat_id, "❌ Lỗi khi lưu trạng thái broadcast, vui lòng thử lại")
             return
 
