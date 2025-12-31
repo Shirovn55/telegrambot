@@ -6,6 +6,7 @@ NgânMiu.Store — Telegram Bot
 ✅ Batch update (giảm API calls)
 ✅ Retry logic (tăng stability)
 ✅ Chỉ SEPAY - Xóa nạp tay
+✅ ⭐ HỖ TRỢ LƯU TỐI ĐA 10 COOKIE CÙNG LÚC ⭐
 """
 
 import os
@@ -52,6 +53,12 @@ ADMIN_ID   = int(os.getenv("ADMIN_TELEGRAM_ID", "0"))
 
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 SAVE_URL = "https://shopee.vn/api/v2/voucher_wallet/save_vouchers"
+
+# =========================================================
+# ⭐ MULTI-COOKIE CONFIG ⭐
+# =========================================================
+MAX_COOKIES_PER_REQUEST = 10  # Tối đa 10 cookie
+COOKIE_SEPARATOR = "\n"  # Phân cách bằng dòng mới
 
 # =========================================================
 # TOPUP RULES (SEPAY)
@@ -247,8 +254,8 @@ def tg_answer_callback(callback_id, text=None, show_alert=False):
 def build_main_keyboard():
     return {
         "keyboard": [
-            ["🎁 Kích Hoạt Tặng 5k", "💳 Nạp tiền"],
-            ["💰 Số dư", "🎟️Lưu Voucher"],
+            ["🎊 Kích Hoạt Tặng 5k", "💎 Nạp tiền"],
+            ["💰 Số dư", "🎁 Lưu Voucher"],
             ["📜 Lịch sử nạp tiền"]
         ],
         "resize_keyboard": True
@@ -736,6 +743,36 @@ def topup_history_text(user_id, limit=10):
     return "\n".join(out)
 
 # =========================================================
+# ⭐ MULTI-COOKIE PARSER ⭐
+# =========================================================
+def parse_cookies(text):
+    """
+    Parse multiple cookies từ text
+    Hỗ trợ:
+    - Phân cách bằng dòng mới (\n)
+    - Tự động trim whitespace
+    - Bỏ qua dòng trống
+    - Giới hạn MAX_COOKIES_PER_REQUEST
+    
+    Returns: list of cookies (max 10)
+    """
+    # Split by newlines
+    lines = text.strip().split('\n')
+    
+    # Clean và filter
+    cookies = []
+    for line in lines:
+        cookie = line.strip()
+        if cookie:  # Bỏ qua dòng trống
+            cookies.append(cookie)
+    
+    # Giới hạn số lượng
+    if len(cookies) > MAX_COOKIES_PER_REQUEST:
+        cookies = cookies[:MAX_COOKIES_PER_REQUEST]
+    
+    return cookies
+
+# =========================================================
 # VOUCHER UTIL
 # =========================================================
 def get_voucher(cmd):
@@ -799,6 +836,37 @@ def save_voucher_and_check(cookie, voucher):
         return False, f"EXCEPTION_{str(e)}"
 
 # =========================================================
+# ⭐ MULTI-COOKIE VOUCHER SAVER ⭐
+# =========================================================
+def save_voucher_multi_cookies(cookies, voucher):
+    """
+    Lưu voucher cho nhiều cookie
+    
+    Returns:
+        success_count: số cookie lưu thành công
+        total_count: tổng số cookie
+        failed_details: [(cookie_index, reason)]
+    """
+    success_count = 0
+    failed_details = []
+    
+    for idx, cookie in enumerate(cookies, 1):
+        ok, reason = save_voucher_and_check(cookie, voucher)
+        
+        if ok:
+            success_count += 1
+            dprint(f"✅ Cookie #{idx}: SUCCESS")
+        else:
+            failed_details.append((idx, reason))
+            dprint(f"❌ Cookie #{idx}: {reason}")
+        
+        # Delay nhẹ giữa các request
+        if idx < len(cookies):
+            time.sleep(0.1)
+    
+    return success_count, len(cookies), failed_details
+
+# =========================================================
 # COMBO UTIL
 # =========================================================
 def get_vouchers_by_combo(combo_key):
@@ -823,6 +891,7 @@ def get_vouchers_by_combo(combo_key):
     return items, None
 
 def process_combo1(cookie):
+    """Process COMBO1 với 1 cookie"""
     vouchers, err = get_vouchers_by_combo(COMBO1_KEY)
     if err:
         return False, err, 0, 0, []
@@ -849,38 +918,371 @@ def process_combo1(cookie):
 
     return True, total_price, len(saved), len(vouchers), failed
 
-# =========================================================
-# VOUCHER KEYBOARD
-# =========================================================
-def build_voucher_info_text():
-    return (
-        "🎁 <b>VOUCHER HIỆN CÓ</b>\n"
-        "━━━━━━━━━━━━━━━\n"
-        "🟢 <b>Voucher đơn</b>\n"
-        "• Mã 100k 0đ — 💰Giá 1.000 VNĐ\n"
-        "• Mã 50% Max 200k — 💰Giá 1.000 VNĐ\n"
-        "• Freeship Hỏa Tốc — 💰Giá 1.000 VNĐ\n\n"
-        "🟣 <b>COMBO</b>\n"
-        "• COMBO1: 100k/0đ + Freeship Hỏa Tốc\n"
-        "  💰 2.000 VNĐ | 🎫 2 mã\n\n"
-        "👇 <b>BẤM NÚT BÊN DƯỚI ĐỂ MUA</b>"
-    )
+def process_combo1_multi_cookies(cookies):
+    """
+    Process COMBO1 với nhiều cookie
+    
+    Returns:
+        success: True/False
+        total_price: tổng giá phải trả
+        cookies_saved: số cookie lưu thành công
+        total_cookies: tổng số cookie
+        vouchers_per_cookie: số voucher mỗi cookie
+        failed_details: [(cookie_idx, voucher_name, reason)]
+    """
+    vouchers, err = get_vouchers_by_combo(COMBO1_KEY)
+    if err:
+        return False, err, 0, len(cookies), 0, []
+    
+    price_per_cookie = sum(int(v.get("Giá", 0)) for v in vouchers)
+    cookies_saved = 0
+    failed_details = []
+    
+    for cookie_idx, cookie in enumerate(cookies, 1):
+        cookie_success = True
+        
+        for voucher in vouchers:
+            ok, reason = save_voucher_and_check(cookie, voucher)
+            
+            if not ok:
+                cookie_success = False
+                failed_details.append((
+                    cookie_idx,
+                    voucher.get("Tên Mã", "UNKNOWN"),
+                    reason
+                ))
+                dprint(f"❌ Cookie #{cookie_idx} - {voucher.get('Tên Mã')}: {reason}")
+            else:
+                dprint(f"✅ Cookie #{cookie_idx} - {voucher.get('Tên Mã')}: OK")
+            
+            # Delay giữa các voucher
+            time.sleep(0.1)
+        
+        if cookie_success:
+            cookies_saved += 1
+        
+        # Delay giữa các cookie
+        if cookie_idx < len(cookies):
+            time.sleep(0.2)
+    
+    if cookies_saved == 0:
+        return False, "Không lưu được cookie nào", 0, len(cookies), len(vouchers), failed_details
+    
+    total_price = cookies_saved * price_per_cookie
+    
+    return True, total_price, cookies_saved, len(cookies), len(vouchers), failed_details
 
-def build_quick_voucher_keyboard():
-    return {
+
+# =========================================================
+# ⭐ DYNAMIC VOUCHER KEYBOARD FROM SHEET ⭐
+# =========================================================
+
+# Cache để giảm API calls
+VOUCHER_KEYBOARD_CACHE = {
+    "keyboard": None,
+    "info_text": None,
+    "last_update": 0
+}
+KEYBOARD_CACHE_DURATION = 60  # 60 giây
+
+def apply_strikethrough(text):
+    """Apply strikethrough Unicode characters"""
+    strikethrough_map = {
+        'A': 'A̶', 'B': 'B̶', 'C': 'C̶', 'D': 'D̶', 'E': 'E̶', 'F': 'F̶', 'G': 'G̶', 'H': 'H̶', 
+        'I': 'I̶', 'J': 'J̶', 'K': 'K̶', 'L': 'L̶', 'M': 'M̶', 'N': 'N̶', 'O': 'O̶', 'P': 'P̶',
+        'Q': 'Q̶', 'R': 'R̶', 'S': 'S̶', 'T': 'T̶', 'U': 'U̶', 'V': 'V̶', 'W': 'W̶', 'X': 'X̶',
+        'Y': 'Y̶', 'Z': 'Z̶',
+        'a': 'a̶', 'b': 'b̶', 'c': 'c̶', 'd': 'd̶', 'e': 'e̶', 'f': 'f̶', 'g': 'g̶', 'h': 'h̶',
+        'i': 'i̶', 'j': 'j̶', 'k': 'k̶', 'l': 'l̶', 'm': 'm̶', 'n': 'n̶', 'o': 'o̶', 'p': 'p̶',
+        'q': 'q̶', 'r': 'r̶', 's': 's̶', 't': 't̶', 'u': 'u̶', 'v': 'v̶', 'w': 'w̶', 'x': 'x̶',
+        'y': 'y̶', 'z': 'z̶',
+        '0': '0̶', '1': '1̶', '2': '2̶', '3': '3̶', '4': '4̶', '5': '5̶', '6': '6̶', '7': '7̶',
+        '8': '8̶', '9': '9̶',
+        '%': '%̶', '+': '+̶', '/': '/̶', ' ': ' ̶', 'đ': 'đ̶', 'á': 'á̶', 'à': 'à̶', 'ả': 'ả̶',
+        'ã': 'ã̶', 'ạ': 'ạ̶', 'â': 'â̶', 'ê': 'ê̶', 'í': 'í̶', 'ì': 'ì̶', 'ỉ': 'ỉ̶', 'ĩ': 'ĩ̶',
+        'ị': 'ị̶', 'ó': 'ó̶', 'ò': 'ò̶', 'ỏ': 'ỏ̶', 'õ': 'õ̶', 'ọ': 'ọ̶', 'ô': 'ô̶', 'ơ': 'ơ̶',
+        'ú': 'ú̶', 'ù': 'ù̶', 'ủ': 'ủ̶', 'ũ': 'ũ̶', 'ụ': 'ụ̶', 'ư': 'ư̶', 'ý': 'ý̶', 'ỳ': 'ỳ̶',
+        'ỷ': 'ỷ̶', 'ỹ': 'ỹ̶', 'ỵ': 'ỵ̶', 'ế': 'ế̶', 'ề': 'ề̶', 'ể': 'ể̶', 'ễ': 'ễ̶', 'ệ': 'ệ̶',
+        'ố': 'ố̶', 'ồ': 'ồ̶', 'ổ': 'ổ̶', 'ỗ': 'ỗ̶', 'ộ': 'ộ̶', 'ớ': 'ớ̶', 'ờ': 'ờ̶', 'ở': 'ở̶',
+        'ỡ': 'ỡ̶', 'ợ': 'ợ̶', 'ứ': 'ứ̶', 'ừ': 'ừ̶', 'ử': 'ử̶', 'ữ': 'ữ̶', 'ự': 'ự̶',
+    }
+    result = ""
+    for char in text:
+        result += strikethrough_map.get(char, char)
+    return result
+
+def parse_position(pos_str):
+    """
+    Parse position string: 1A, 1B, 2A, B1, C2, etc.
+    Hỗ trợ cả 2 format:
+    - Số + Chữ: 1A, 2B, 10C... → (row_num, col_letter)
+    - Chữ + Số: A1, B2, C3... → (col_letter_as_row, number_as_col)
+    
+    Returns: (row_num, col_letter) or None
+    """
+    if not pos_str or not isinstance(pos_str, str):
+        return None
+    
+    pos_str = pos_str.strip().upper()
+    
+    import re
+    
+    # Format 1: Số + Chữ (1A, 2B, 10C...)
+    match = re.match(r'^(\d+)([A-Z])$', pos_str)
+    if match:
+        row_num = int(match.group(1))
+        col_letter = match.group(2)
+        return (row_num, col_letter)
+    
+    # Format 2: Chữ + Số (A1, B2, C3...)
+    # Convert: A1 → (1, A), B1 → (2, A), C1 → (3, A)
+    match = re.match(r'^([A-Z])(\d+)$', pos_str)
+    if match:
+        letter = match.group(1)
+        number = int(match.group(2))
+        
+        # Map letter to row: A=1, B=2, C=3...
+        row_num = ord(letter) - ord('A') + 1
+        
+        # Map number to column: 1=A, 2=B, 3=C...
+        col_letter = chr(ord('A') + number - 1)
+        
+        return (row_num, col_letter)
+    
+    return None
+
+def build_voucher_keyboard_from_sheet():
+    """
+    Build keyboard dynamically from VoucherStock sheet
+    Returns: (keyboard_dict, info_text)
+    """
+    if not SHEET_READY:
+        dprint("❌ Sheet not ready, using static keyboard")
+        return build_static_voucher_keyboard()
+    
+    try:
+        dprint("📊 Reading VoucherStock sheet...")
+        all_rows = ws_voucher.get_all_records()
+        dprint(f"📊 Found {len(all_rows)} rows in VoucherStock")
+        
+        vouchers_by_position = {}
+        has_combo = False
+        combo_price = 0
+        combo_count = 0
+        
+        info_lines = ["🎊 <b>VOUCHER HIỆN CÓ - HAPPY NEW YEAR 2025!</b> 🎊\n━━━━━━━━━━━━━━━"]
+        
+        for idx, row in enumerate(all_rows, 1):
+            dprint(f"Row {idx}: {row.get('Tên Mã', 'N/A')}")
+            
+            # Debug: Show all available column names
+            if idx == 1:
+                dprint(f"  📋 Available columns: {list(row.keys())}")
+            
+            # ✅ CHECK "Display" COLUMN - Try multiple variations
+            display = ""
+            for key in ["Display", "Show", "Visible", "Hiển thị", "Hiển Thị", "Hien thi", "Hien Thi"]:
+                if key in row:
+                    display = str(row[key]).strip().upper()
+                    if display:
+                        dprint(f"  Found display column: '{key}' = '{display}'")
+                        break
+            
+            dprint(f"  Display value: '{display}'")
+            
+            # Accept: YES, Y, TRUE, 1
+            if display not in ["YES", "Y", "TRUE", "1"]:
+                dprint(f"  ⚠️ Skipped (Display != Yes)")
+                continue
+            
+            pos_str = str(row.get("Vị trí", "")).strip()
+            if not pos_str:
+                pos_str = str(row.get("Vị Trí", "")).strip()
+            if not pos_str:
+                pos_str = str(row.get("Position", "")).strip()
+            dprint(f"  Position: '{pos_str}'")
+            
+            combo = str(row.get("Combo", "")).strip().lower()
+            if combo == "combo1":
+                has_combo = True
+                try:
+                    combo_price += int(row.get("Giá", 0))
+                    combo_count += 1
+                except:
+                    pass
+            
+            if not pos_str:
+                dprint(f"  ⚠️ Skipped (no position)")
+                continue
+            
+            position = parse_position(pos_str)
+            if not position:
+                dprint(f"  ⚠️ Invalid position format: {pos_str}")
+                continue
+            
+            dprint(f"  ✅ Added at position {position}")
+            vouchers_by_position[position] = row
+        
+        dprint(f"📊 Total vouchers with valid position: {len(vouchers_by_position)}")
+        
+        if len(vouchers_by_position) == 0:
+            dprint("❌ No vouchers found, using static keyboard")
+            return build_static_voucher_keyboard()
+        
+        keyboard_rows = []
+        current_row_num = None
+        current_row_buttons = []
+        
+        sorted_positions = sorted(vouchers_by_position.keys())
+        dprint(f"📊 Sorted positions: {sorted_positions}")
+        
+        for position in sorted_positions:
+            row_num, col_letter = position
+            voucher = vouchers_by_position[position]
+            
+            if current_row_num != row_num:
+                if current_row_buttons:
+                    keyboard_rows.append(current_row_buttons)
+                    dprint(f"Added row {current_row_num}: {len(current_row_buttons)} buttons")
+                current_row_buttons = []
+                current_row_num = row_num
+            
+            ten_hien_thi = str(voucher.get("Tên hiển thị", "")).strip()
+            if not ten_hien_thi:
+                ten_hien_thi = str(voucher.get("Tên Hiển Thị", "")).strip()
+            if not ten_hien_thi:
+                ten_hien_thi = str(voucher.get("Display Name", "")).strip()
+            if not ten_hien_thi:
+                ten_hien_thi = str(voucher.get("DisplayName", "")).strip()
+            if not ten_hien_thi:
+                ten_hien_thi = str(voucher.get("Tên Mã", "")).strip()
+            
+            dprint(f"    Display Name: '{ten_hien_thi}'")
+            
+            trang_thai = str(voucher.get("Trạng Thái", "")).strip()
+            if not trang_thai:
+                trang_thai = str(voucher.get("Trạng thái", "")).strip()
+            
+            ten_ma = str(voucher.get("Tên Mã", "")).strip()
+            if not ten_ma:
+                ten_ma = str(voucher.get("Tên mã", "")).strip()
+            
+            gia = int(voucher.get("Giá", 0))
+            
+            is_sold_out = trang_thai != "Còn Mã"
+            
+            if is_sold_out:
+                button_text = f"⚫ {apply_strikethrough(ten_hien_thi)} (Hết)"
+                callback_data = f"SOLD_OUT:{ten_ma}"
+            else:
+                # ✨ Thêm emoji năm mới ngẫu nhiên
+                new_year_emojis = ["🎊", "🎉", "✨", "🎁", "🔥", "⭐", "💫"]
+                import random
+                emoji = random.choice(new_year_emojis)
+                button_text = f"{emoji} {ten_hien_thi}"
+                callback_data = f"BUY:{ten_ma}"
+            
+            current_row_buttons.append({
+                "text": button_text,
+                "callback_data": callback_data
+            })
+            
+            if not is_sold_out:
+                info_lines.append(f"• {ten_hien_thi} — 💰Giá {gia:,} VNĐ")
+        
+        if current_row_buttons:
+            keyboard_rows.append(current_row_buttons)
+            dprint(f"Added last row {current_row_num}: {len(current_row_buttons)} buttons")
+        
+        if has_combo:
+            keyboard_rows.append([{
+                "text": "🎆 COMBO1 | Mã 100k + Ship HT 🎆",
+                "callback_data": "BUY:combo1"
+            }])
+            info_lines.append(f"\n🟣 <b>COMBO ĐẶC BIỆT</b>")
+            info_lines.append(f"• COMBO1: 100k/0đ + Freeship Hỏa Tốc")
+            info_lines.append(f"  💰 {combo_price:,} VNĐ | 🎫 {combo_count} mã")
+        
+        info_lines.append("\n⭐ <b>HỖ TRỢ LƯU TỐI ĐA 10 COOKIE</b>")
+        info_lines.append("💡 Gửi mỗi cookie 1 dòng")
+        info_lines.append("\n👇 <b>BẤM NÚT BÊN DƯỚI ĐỂ MUA</b>")
+        
+        keyboard = {"inline_keyboard": keyboard_rows}
+        info_text = "\n".join(info_lines)
+        
+        dprint(f"✅ Built keyboard with {len(keyboard_rows)} rows")
+        
+        return keyboard, info_text
+        
+    except Exception as e:
+        dprint(f"❌ Error building keyboard from sheet: {e}")
+        import traceback
+        traceback.print_exc()
+        return build_static_voucher_keyboard()
+
+def build_static_voucher_keyboard():
+    """Fallback static keyboard"""
+    keyboard = {
         "inline_keyboard": [
             [
-                {"text": "💸 Mã 100k 0đ", "callback_data": "BUY:voucher100k"},
-                {"text": "💸 Mã 50% Max 200k", "callback_data": "BUY:voucher50max200"},
+                {"text": "🎉 Mã 100k 0đ", "callback_data": "BUY:voucher100k"},
+                {"text": "✨ Mã 50% Max 200k", "callback_data": "BUY:voucher50max200"},
             ],
             [
                 {"text": "🚀 Freeship Hỏa Tốc", "callback_data": "BUY:voucherHoaToc"},
             ],
             [
-                {"text": "🎁 COMBO1 | Mã 100k + Ship HT 🔥", "callback_data": "BUY:combo1"}
+                {"text": "🎆 COMBO1 | Mã 100k + Ship HT 🎆", "callback_data": "BUY:combo1"}
             ]
         ]
     }
+    
+    info_text = (
+        "🎊 <b>VOUCHER HIỆN CÓ - HAPPY NEW YEAR 2025!</b> 🎊\n"
+        "━━━━━━━━━━━━━━━\n"
+        "🟢 <b>Voucher đơn</b>\n"
+        "• Mã 100k 0đ — 💰Giá 1.000 VNĐ\n"
+        "• Mã 50% Max 200k — 💰Giá 1.000 VNĐ\n"
+        "• Freeship Hỏa Tốc — 💰Giá 1.000 VNĐ\n\n"
+        "🟣 <b>COMBO ĐẶC BIỆT</b>\n"
+        "• COMBO1: 100k/0đ + Freeship Hỏa Tốc\n"
+        "  💰 2.000 VNĐ | 🎫 2 mã\n\n"
+        "⭐ <b>HỖ TRỢ LƯU TỐI ĐA 10 COOKIE</b>\n"
+        "💡 Gửi mỗi cookie 1 dòng\n\n"
+        "👇 <b>BẤM NÚT BÊN DƯỚI ĐỂ MUA</b>"
+    )
+    
+    return keyboard, info_text
+
+def get_voucher_keyboard_cached():
+    """Get voucher keyboard with cache (60s)"""
+    global VOUCHER_KEYBOARD_CACHE
+    
+    now = time.time()
+    
+    if (VOUCHER_KEYBOARD_CACHE["keyboard"] and 
+        now - VOUCHER_KEYBOARD_CACHE["last_update"] < KEYBOARD_CACHE_DURATION):
+        dprint("Using cached keyboard")
+        return VOUCHER_KEYBOARD_CACHE["keyboard"], VOUCHER_KEYBOARD_CACHE["info_text"]
+    
+    dprint("Rebuilding keyboard from sheet...")
+    keyboard, info_text = build_voucher_keyboard_from_sheet()
+    
+    VOUCHER_KEYBOARD_CACHE["keyboard"] = keyboard
+    VOUCHER_KEYBOARD_CACHE["info_text"] = info_text
+    VOUCHER_KEYBOARD_CACHE["last_update"] = now
+    
+    return keyboard, info_text
+
+def build_voucher_info_text():
+    """Get info text (with cache)"""
+    _, info_text = get_voucher_keyboard_cached()
+    return info_text
+
+def build_quick_voucher_keyboard():
+    """Get keyboard (with cache)"""
+    keyboard, _ = get_voucher_keyboard_cached()
+    return keyboard
 
 def build_quick_buy_keyboard(cmd):
     MAP = {
@@ -934,11 +1336,199 @@ def handle_active_gift_5k(user_id, username):
 # =========================================================
 # CALLBACK QUERY HANDLER
 # =========================================================
+
+# =========================================================
+# TỔNG KẾT KINH DOANH
+# =========================================================
+
+# =========================================================
+# TỔNG KẾT KINH DOANH - ĐÚNG THEO CẤU TRÚC SHEET
+# =========================================================
+
+def parse_date_from_sheet(date_str):
+    """Parse date từ sheet (format: 2025-12-31 14:30:45)"""
+    try:
+        if isinstance(date_str, datetime):
+            return date_str
+        # Format: "2025-12-31 14:30:45"
+        return datetime.strptime(str(date_str).strip(), "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        try:
+            # Backup: "31/12/2025 14:30:45"
+            return datetime.strptime(str(date_str).strip(), "%d/%m/%Y %H:%M:%S")
+        except Exception:
+            return None
+
+def get_today_stats():
+    """Lấy thống kê chi tiết từng loại voucher"""
+    if not SHEET_READY:
+        return None
+    
+    today = datetime.now(VIETNAM_TZ).date()
+    stats = {
+        "napten_count": 0,
+        "napten_amount": 0,
+        "napten_bonus": 0,
+        "napten_users": set(),
+        "voucher_details": {},  # {"voucher100k": 15, "combo1": 8}
+        "total_usage": 0,
+        "active_users": set(),
+    }
+    
+    # ===== ĐỌC NAP TIEN =====
+    try:
+        if ws_nap_tien:
+            all_rows = ws_nap_tien.get_all_values()
+            for row in all_rows[1:]:  # Skip header
+                if len(row) < 7:
+                    continue
+                try:
+                    # Cột A = time
+                    row_date = parse_date_from_sheet(row[0])
+                    if row_date and row_date.date() == today:
+                        user_id = int(row[1])  # Cột B = Tele ID
+                        amount = int(row[3]) if row[3] else 0  # Cột D = số tiền
+                        note = row[6]  # Cột G = nội dung (+10%=7500)
+                        
+                        stats["napten_count"] += 1
+                        stats["napten_amount"] += amount
+                        stats["napten_users"].add(user_id)
+                        stats["active_users"].add(user_id)
+                        
+                        # Parse bonus từ note (+10%=7500)
+                        if note and "=" in note:
+                            try:
+                                stats["napten_bonus"] += int(note.split("=")[1])
+                            except:
+                                pass
+                except:
+                    continue
+    except Exception as e:
+        dprint(f"Error reading Nap Tien: {e}")
+    
+    # ===== ĐỌC LOGS - ĐẾM TỪNG LOẠI VOUCHER =====
+    try:
+        if ws_log:
+            all_logs = ws_log.get_all_values()
+            for row in all_logs[1:]:  # Skip header
+                if len(row) < 6:
+                    continue
+                try:
+                    # Cột A = time
+                    row_date = parse_date_from_sheet(row[0])
+                    if row_date and row_date.date() == today:
+                        user_id = int(row[1])  # Cột B = Tele ID
+                        action = row[3]  # Cột D = voucher/COMBO1/AUTO_ACTIVE
+                        details = row[5]  # Cột F = voucher100k hoặc balance_sau
+                        
+                        stats["active_users"].add(user_id)
+                        
+                        # ĐẾM VOUCHER ĐƠN
+                        if action == "VOUCHER":
+                            # Cột F = tên voucher (voucher100k, voucher50max200, voucherHoaToc)
+                            voucher_name = details
+                            if voucher_name not in stats["voucher_details"]:
+                                stats["voucher_details"][voucher_name] = 0
+                            stats["voucher_details"][voucher_name] += 1
+                            stats["total_usage"] += 1
+                        
+                        # ĐẾM COMBO1
+                        elif action == "COMBO1":
+                            if "COMBO1" not in stats["voucher_details"]:
+                                stats["voucher_details"]["COMBO1"] = 0
+                            stats["voucher_details"]["COMBO1"] += 1
+                            stats["total_usage"] += 1
+                except:
+                    continue
+    except Exception as e:
+        dprint(f"Error reading Logs: {e}")
+    
+    # Convert set to count
+    stats["napten_users"] = len(stats["napten_users"])
+    stats["active_users"] = len(stats["active_users"])
+    
+    return stats
+
+def format_tongket_message(stats):
+    """Format message tổng kết"""
+    if not stats:
+        return "❌ Không thể lấy dữ liệu"
+    
+    today_str = datetime.now(VIETNAM_TZ).strftime("%d/%m/%Y")
+    total_in = stats["napten_amount"] + stats["napten_bonus"]
+    
+    msg = f"""📊 <b>BÁO CÁO TỔNG KẾT</b>
+📅 {today_str}
+
+━━━━━━━━━━━━━━━━━━
+💰 <b>NẠP TIỀN</b>
+• Lượt nạp: <b>{stats['napten_count']}</b>
+• User nạp: <b>{stats['napten_users']}</b>
+• Tiền gốc: <b>{stats['napten_amount']:,}đ</b>
+• Thưởng: <b>+{stats['napten_bonus']:,}đ</b>
+• <b>Tổng vào: {total_in:,}đ</b>
+
+━━━━━━━━━━━━━━━━━━
+🎟️ <b>VOUCHER ĐÃ LƯU</b>"""
+    
+    # Hiển thị chi tiết từng voucher
+    if stats["voucher_details"]:
+        # Sắp xếp theo số lượng
+        sorted_vouchers = sorted(
+            stats["voucher_details"].items(), 
+            key=lambda x: x[1], 
+            reverse=True
+        )
+        
+        for voucher_name, count in sorted_vouchers:
+            # Format tên đẹp
+            if voucher_name == "COMBO1":
+                display_name = "🎁 COMBO1"
+            elif "100k" in voucher_name.lower():
+                display_name = "💸 Mã 100k 0đ"
+            elif "50max200" in voucher_name.lower():
+                display_name = "💸 Mã 50% Max 200k"
+            elif "hoatoc" in voucher_name.lower():
+                display_name = "🚀 Freeship Hỏa Tốc"
+            else:
+                display_name = f"🎫 {voucher_name}"
+            
+            msg += f"\n• {display_name}: <b>{count}</b> lượt"
+        
+        msg += f"\n\n<b>━ Tổng: {stats['total_usage']} lượt lưu</b>"
+    else:
+        msg += "\n<i>Chưa có voucher nào được lưu</i>"
+    
+    msg += f"\n\n━━━━━━━━━━━━━━━━━━\n👥 <b>USER HOẠT ĐỘNG</b>\n• Tổng: <b>{stats['active_users']}</b> user"
+    
+    return msg
+
+def handle_tongket_command(chat_id, user_id):
+    """Xử lý lệnh /tongket"""
+    if user_id != ADMIN_ID:
+        tg_send(chat_id, "⛔ Chỉ admin")
+        return
+    
+    tg_send(chat_id, "⏳ Đang tổng hợp dữ liệu...")
+    stats = get_today_stats()
+    
+    if not stats:
+        tg_send(chat_id, "❌ Lỗi khi đọc dữ liệu")
+        return
+    
+    msg = format_tongket_message(stats)
+    tg_send(chat_id, msg)
+
 def handle_callback_query(cb):
     cb_id = cb.get("id")
     data = cb.get("data", "")
     from_user = cb.get("from", {})
     user_id = from_user.get("id")
+
+    # SOLD_OUT:voucher100k
+    if data.startswith("SOLD_OUT:"):
+        tg_answer_callback(cb_id, "⚠️ Voucher này tạm hết mã. Vui lòng quay lại sau!", True)
+        return
 
     # BUY:voucher100k | BUY:combo1
     if data.startswith("BUY:"):
@@ -961,7 +1551,12 @@ def handle_callback_query(cb):
         PENDING_VOUCHER[user_id] = cmd
 
         tg_answer_callback(cb_id)
-        tg_send(user_id, f"👉 Gửi <b>cookie</b> vào đây để lưu <b>{cmd}</b>")
+        tg_send(
+            user_id,
+            f"👉 Gửi <b>cookie</b> vào đây để lưu <b>{cmd}</b>\n\n"
+            f"⭐ <b>Hỗ trợ lưu tối đa 10 cookie</b>\n"
+            f"💡 Gửi mỗi cookie 1 dòng"
+        )
         return
 
     tg_answer_callback(cb_id, "⚠️ Thao tác không hỗ trợ", True)
@@ -1058,6 +1653,31 @@ def handle_update(update):
     user_id = msg["from"]["id"]
     username = msg["from"].get("username", "")
     text = (msg.get("text") or "").strip()
+
+    # /tongket
+    if text == "/tongket":
+        handle_tongket_command(chat_id, user_id)
+        return
+    
+    # /update - Force reload keyboard cache (Admin only)
+    if text == "/update":
+        if user_id != ADMIN_ID:
+            tg_send(chat_id, "⛔ Chỉ admin")
+            return
+        
+        global VOUCHER_KEYBOARD_CACHE
+        VOUCHER_KEYBOARD_CACHE = {
+            "keyboard": None,
+            "info_text": None,
+            "last_update": 0
+        }
+        
+        # Rebuild ngay
+        keyboard, info_text = get_voucher_keyboard_cached()
+        
+        tg_send(chat_id, "✅ Đã cập nhập bản mới nhất!!")
+        tg_send(chat_id, info_text, keyboard)
+        return
     
     # ✅ Skip messages không có text (ảnh, sticker, voice...)
     # Chỉ xử lý các message quan trọng không cần text
@@ -1200,7 +1820,7 @@ def handle_update(update):
         return
 
     # ===== KÍCH HOẠT + TẶNG 5K =====
-    if text == "🎁 Kích Hoạt Tặng 5k":
+    if text in ("🎊 Kích Hoạt Tặng 5k", "🎁 Kích Hoạt Tặng 5k"):
         ok, result = handle_active_gift_5k(user_id, username)
 
         if not ok:
@@ -1222,7 +1842,7 @@ def handle_update(update):
         return
 
     # ===== NẠP TIỀN (CHỈ SEPAY) =====
-    if text == "💳 Nạp tiền":
+    if text in ("💎 Nạp tiền", "💳 Nạp tiền"):
         ensure_user_exists(user_id, username)
 
         qr = build_sepay_qr(user_id)
@@ -1267,7 +1887,7 @@ def handle_update(update):
         return
 
     # ===== VOUCHER =====
-    if text in ("🎟️Lưu Voucher", "Voucher", "🎟️ Voucher"):
+    if text in ("🎁 Lưu Voucher", "🎟️Lưu Voucher", "Voucher", "🎟️ Voucher"):
         tg_send(
             chat_id,
             build_voucher_info_text(),
@@ -1290,22 +1910,29 @@ def handle_update(update):
     # ===== ĐANG CHỜ COOKIE =====
     if user_id in PENDING_VOUCHER and not text.startswith("/"):
         cmd = PENDING_VOUCHER.pop(user_id)
-        cookie = text.strip()
+        
+        # ⭐ PARSE MULTIPLE COOKIES
+        cookies = parse_cookies(text)
+        
+        if not cookies:
+            tg_send(chat_id, "❌ Không tìm thấy cookie hợp lệ")
+            return
+        
+        num_cookies = len(cookies)
+        dprint(f"📊 Received {num_cookies} cookies")
 
         # ----- COMBO1 -----
         if cmd == COMBO1_KEY:
-            ok, total_price, n_saved, n_total, failed = process_combo1(cookie)
+            ok, total_price, cookies_saved, total_cookies, vouchers_per_cookie, failed = process_combo1_multi_cookies(cookies)
 
             if not ok:
                 tg_send(chat_id, f"❌ <b>COMBO1 THẤT BẠI</b>\n{total_price}")
-                # ✅ Track lỗi
                 if track_error(user_id):
                     tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
                 return
 
             if balance < total_price:
-                tg_send(chat_id, "❌ Không đủ số dư")
-                # ✅ Track lỗi
+                tg_send(chat_id, f"❌ Không đủ số dư\n💰 Cần: {total_price:,}đ")
                 if track_error(user_id):
                     tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
                 return
@@ -1313,19 +1940,12 @@ def handle_update(update):
             new_bal = balance - total_price
             ws_money.update_cell(row, 3, new_bal)
 
-            log_row(user_id, username, "COMBO1", str(total_price), f"{n_saved}/{n_total}")
+            log_row(user_id, username, "COMBO1", str(total_price), f"Lưu COMBO1 {cookies_saved}/{total_cookies} thành công")
 
-            msg_text = (
-                "✅ <b>COMBO1 THÀNH CÔNG</b>\n"
-                f"🎫 Lưu: <b>{n_saved}/{n_total}</b>\n"
-                f"💸 Trừ: <b>{total_price:,}đ</b>\n"
-                f"💰 Còn: <b>{new_bal:,}đ</b>"
-            )
-
-            if failed:
-                msg_text += "\n\n⚠️ Voucher lỗi:\n"
-                for name, reason in failed:
-                    msg_text += f"- {name}: {reason}\n"
+            if cookies_saved == total_cookies:
+                msg_text = f"✅ Lưu COMBO1 <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
+            else:
+                msg_text = f"⚠️ Lưu COMBO1 <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
 
             tg_send(chat_id, msg_text)
             tg_send(chat_id, "👉 <b>Bấm để lưu tiếp nhanh</b>", build_quick_buy_keyboard("combo1"))
@@ -1335,38 +1955,41 @@ def handle_update(update):
         v, err = get_voucher(cmd)
         if err:
             tg_send(chat_id, f"❌ {err}")
-            # ✅ Track lỗi
             if track_error(user_id):
                 tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
             return
 
         price = int(v.get("Giá", 0))
-        if balance < price:
-            tg_send(chat_id, "❌ Không đủ số dư")
-            # ✅ Track lỗi
+        total_price = price * num_cookies
+        
+        if balance < total_price:
+            tg_send(chat_id, f"❌ Không đủ số dư\n💰 Cần: {total_price:,}đ ({price:,}đ × {num_cookies})")
             if track_error(user_id):
                 tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
             return
 
-        ok, reason = save_voucher_and_check(cookie, v)
-        if not ok:
-            tg_send(chat_id, "❌ Lưu mã thất bại\n💸 Không trừ tiền")
-            # ✅ Track lỗi
+        # ⭐ SAVE TO MULTI COOKIES
+        success_count, total_count, failed_details = save_voucher_multi_cookies(cookies, v)
+        
+        if success_count == 0:
+            tg_send(chat_id, "❌ Không lưu được cookie nào\n💸 Không trừ tiền")
             if track_error(user_id):
                 tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
             return
 
-        new_bal = balance - price
+        # Calculate actual price
+        actual_price = price * success_count
+        new_bal = balance - actual_price
         ws_money.update_cell(row, 3, new_bal)
 
-        log_row(user_id, username, "VOUCHER", str(price), cmd)
+        log_row(user_id, username, "VOUCHER", str(actual_price), f"Lưu {cmd} {success_count}/{total_count} thành công")
 
-        tg_send(
-            chat_id,
-            f"✅ <b>Thành công</b>\n"
-            f"💸 -{price:,}đ\n"
-            f"💰 Còn: <b>{new_bal:,}đ</b>"
-        )
+        if success_count == total_count:
+            msg_text = f"✅ Lưu <b>{success_count}/{total_count}</b> thành công | -{actual_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
+        else:
+            msg_text = f"⚠️ Lưu <b>{success_count}/{total_count}</b> thành công | -{actual_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
+
+        tg_send(chat_id, msg_text)
         tg_send(chat_id, "👉 <b>Bấm để lưu tiếp nhanh</b>", build_quick_buy_keyboard(cmd))
         return
 
@@ -1380,31 +2003,43 @@ def handle_update(update):
         return
     
     cmd = parts[0].replace("/", "")
-    cookie = parts[1] if len(parts) > 1 else ""
+    cookie_text = parts[1] if len(parts) > 1 else ""
 
     # ----- COMBO1 -----
     if cmd == COMBO1_KEY:
-        if not cookie:
+        if not cookie_text:
             # ✅ Xóa lệnh cũ
             if user_id in PENDING_VOUCHER:
                 dprint(f"Cleared old pending: {PENDING_VOUCHER[user_id]}")
             
             PENDING_VOUCHER[user_id] = COMBO1_KEY
-            tg_send(chat_id, "👉 Gửi <b>cookie</b> để lưu combo1")
+            tg_send(
+                chat_id,
+                "👉 Gửi <b>cookie</b> để lưu combo1\n\n"
+                "⭐ <b>Hỗ trợ lưu tối đa 10 cookie</b>\n"
+                "💡 Gửi mỗi cookie 1 dòng"
+            )
             return
 
-        ok, total_price, n_saved, n_total, failed = process_combo1(cookie)
+        # ⭐ PARSE MULTIPLE COOKIES
+        cookies = parse_cookies(cookie_text)
+        
+        if not cookies:
+            tg_send(chat_id, "❌ Không tìm thấy cookie hợp lệ")
+            return
+        
+        num_cookies = len(cookies)
+
+        ok, total_price, cookies_saved, total_cookies, vouchers_per_cookie, failed = process_combo1_multi_cookies(cookies)
 
         if not ok:
             tg_send(chat_id, f"❌ COMBO1 THẤT BẠI\n{total_price}")
-            # ✅ Track lỗi
             if track_error(user_id):
                 tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
             return
 
         if balance < total_price:
-            tg_send(chat_id, "❌ Không đủ số dư")
-            # ✅ Track lỗi
+            tg_send(chat_id, f"❌ Không đủ số dư\n💰 Cần: {total_price:,}đ")
             if track_error(user_id):
                 tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
             return
@@ -1412,65 +2047,78 @@ def handle_update(update):
         new_bal = balance - total_price
         ws_money.update_cell(row, 3, new_bal)
 
-        log_row(user_id, username, "COMBO1", str(total_price), f"{n_saved}/{n_total}")
+        log_row(user_id, username, "COMBO1", str(total_price), f"Lưu COMBO1 {cookies_saved}/{total_cookies} thành công")
 
-        tg_send(
-            chat_id,
-            f"✅ <b>COMBO1 OK</b>\n"
-            f"🎫 {n_saved}/{n_total}\n"
-            f"💸 {total_price:,}đ\n"
-            f"💰 {new_bal:,}đ",
-            build_main_keyboard()
-        )
+        if cookies_saved == total_cookies:
+            msg_text = f"✅ Lưu COMBO1 <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
+        else:
+            msg_text = f"⚠️ Lưu COMBO1 <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
+
+        tg_send(chat_id, msg_text, build_main_keyboard())
         return
 
     # ----- VOUCHER ĐƠN -----
     if cmd.startswith("voucher"):
-        if not cookie:
+        if not cookie_text:
             # ✅ Xóa lệnh cũ
             if user_id in PENDING_VOUCHER:
                 dprint(f"Cleared old pending: {PENDING_VOUCHER[user_id]}")
             
             PENDING_VOUCHER[user_id] = cmd
-            tg_send(chat_id, f"👉 Gửi <b>cookie</b> để lưu {cmd}")
+            tg_send(
+                chat_id,
+                f"👉 Gửi <b>cookie</b> để lưu {cmd}\n\n"
+                f"⭐ <b>Hỗ trợ lưu tối đa 10 cookie</b>\n"
+                f"💡 Gửi mỗi cookie 1 dòng"
+            )
             return
+
+        # ⭐ PARSE MULTIPLE COOKIES
+        cookies = parse_cookies(cookie_text)
+        
+        if not cookies:
+            tg_send(chat_id, "❌ Không tìm thấy cookie hợp lệ")
+            return
+        
+        num_cookies = len(cookies)
 
         v, err = get_voucher(cmd)
         if err:
             tg_send(chat_id, f"❌ {err}")
-            # ✅ Track lỗi
             if track_error(user_id):
                 tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
             return
 
         price = int(v.get("Giá", 0))
-        if balance < price:
-            tg_send(chat_id, "❌ Không đủ số dư")
-            # ✅ Track lỗi
+        total_price = price * num_cookies
+        
+        if balance < total_price:
+            tg_send(chat_id, f"❌ Không đủ số dư\n💰 Cần: {total_price:,}đ")
             if track_error(user_id):
                 tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
             return
 
-        ok, reason = save_voucher_and_check(cookie, v)
-        if not ok:
-            tg_send(chat_id, "❌ Lưu mã thất bại\n💸 Không trừ tiền")
-            # ✅ Track lỗi
+        # ⭐ SAVE TO MULTI COOKIES
+        success_count, total_count, failed_details = save_voucher_multi_cookies(cookies, v)
+        
+        if success_count == 0:
+            tg_send(chat_id, "❌ Không lưu được cookie nào\n💸 Không trừ tiền")
             if track_error(user_id):
                 tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
             return
 
-        new_bal = balance - price
+        actual_price = price * success_count
+        new_bal = balance - actual_price
         ws_money.update_cell(row, 3, new_bal)
 
-        log_row(user_id, username, "VOUCHER", str(price), cmd)
+        log_row(user_id, username, "VOUCHER", str(actual_price), f"Lưu {cmd} {success_count}/{total_count} thành công")
 
-        tg_send(
-            chat_id,
-            f"✅ <b>Thành công</b>\n"
-            f"💸 -{price:,}đ\n"
-            f"💰 Còn: <b>{new_bal:,}đ</b>",
-            build_main_keyboard()
-        )
+        if success_count == total_count:
+            msg_text = f"✅ Lưu <b>{success_count}/{total_count}</b> thành công | -{actual_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
+        else:
+            msg_text = f"⚠️ Lưu <b>{success_count}/{total_count}</b> thành công | -{actual_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
+
+        tg_send(chat_id, msg_text, build_main_keyboard())
         return
 
     # ===== FALLBACK =====
@@ -1592,10 +2240,11 @@ def home():
 # =========================================================
 if __name__ == "__main__":
     print("=" * 60)
-    print(" NgânMiu.Store Telegram Bot - OPTIMIZED VERSION")
+    print(" NgânMiu.Store Telegram Bot - MULTI-COOKIE VERSION")
     print("=" * 60)
     print("ADMIN_ID:", ADMIN_ID)
     print("SHEET_READY:", SHEET_READY)
+    print("MAX_COOKIES_PER_REQUEST:", MAX_COOKIES_PER_REQUEST)
     print("=" * 60)
 
     app.run(host="127.0.0.1", port=5000, debug=False)
