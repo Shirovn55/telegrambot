@@ -1070,7 +1070,7 @@ def build_voucher_keyboard_from_sheet():
         combo_price = 0
         combo_count = 0
         
-        info_lines = ["🎊 <b>VOUCHER HIỆN CÓ - HAPPY NEW YEAR 2025!</b> 🎊\n━━━━━━━━━━━━━━━"]
+        info_lines = ["🎊 <b>VOUCHER HIỆN CÓ - HAPPY NEW YEAR 2026!</b> 🎊\n━━━━━━━━━━━━━━━"]
         
         for idx, row in enumerate(all_rows, 1):
             dprint(f"Row {idx}: {row.get('Tên Mã', 'N/A')}")
@@ -1659,7 +1659,7 @@ def handle_update(update):
         handle_tongket_command(chat_id, user_id)
         return
     
-    # /update - Force reload keyboard cache (Admin only)
+    # /update - Force reload keyboard + show menu (Admin only)
     if text == "/update":
         if user_id != ADMIN_ID:
             tg_send(chat_id, "⛔ Chỉ admin")
@@ -1672,11 +1672,19 @@ def handle_update(update):
             "last_update": 0
         }
         
-        # Rebuild ngay
-        keyboard, info_text = get_voucher_keyboard_cached()
+        # Rebuild keyboard cache
+        voucher_keyboard, voucher_info = get_voucher_keyboard_cached()
         
-        tg_send(chat_id, "✅ Đã cập nhập bản mới nhất!!")
-        tg_send(chat_id, info_text, keyboard)
+        # Send success message with main menu
+        tg_send(
+            chat_id, 
+            "✅ Đã cập nhật keyboard từ Sheet!\n\n"
+            "🎊 <b>Menu đã được refresh</b>",
+            build_main_keyboard()
+        )
+        
+        # Show voucher keyboard luôn
+        tg_send(chat_id, voucher_info, voucher_keyboard)
         return
     
     # ✅ Skip messages không có text (ảnh, sticker, voice...)
