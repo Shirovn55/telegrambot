@@ -256,7 +256,7 @@ def build_main_keyboard():
         "keyboard": [
             ["🎊 Kích Hoạt Tặng 5k", "💎 Nạp tiền"],
             ["💰 Số dư", "🎁 Lưu Voucher"],
-            ["📜 Lịch sử nạp tiền"]
+            ["🧩 Hệ Thống Bot NgânMiu"]
         ],
         "resize_keyboard": True
     }
@@ -1890,8 +1890,27 @@ def handle_update(update):
         return
 
     # ===== LỊCH SỬ =====
-    if text in ("📜 Lịch sử nạp tiền", "/topup_history"):
-        tg_send(chat_id, topup_history_text(user_id))
+    if text == "🧩 Hệ Thống Bot NgânMiu":
+        tg_send(
+            chat_id,
+            "🧩 <b>HỆ THỐNG BOT NGÂNMIU</b>\n\n"
+            "👉 <b>Danh sách Bot:</b>\n\n"
+            "🟠 <b>Bot Lưu Voucher</b>\n"
+            "├ Lưu voucher Shopee tự động\n"
+            "└ @nganmiu_bot\n\n"
+            "🟢 <b>Bot Check Đơn Hàng</b>\n"
+            "├ Check đơn hàng Shopee\n"
+            "├ Tra mã vận đơn SPX/GHN\n"
+            "└ @ShopeexCheck_Bot\n\n"
+            "🔵 <b>Bot Thuê Số</b>\n"
+            "├ Thuê số điện thoại ảo\n"
+            "└ Sắp mở 🚧\n\n"
+            "━━━━━━━━━━━━━━━\n"
+            "👥 <b>Group Hỗ Trợ:</b>\n"
+            "https://t.me/botxshopee\n\n"
+            "🌟 <i>Book Đơn Mã New tại NgânMiu.Store</i>",
+            build_main_keyboard()
+        )
         return
 
     # ===== VOUCHER =====
