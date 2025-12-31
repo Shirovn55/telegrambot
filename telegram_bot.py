@@ -1678,7 +1678,7 @@ def handle_update(update):
         # Send success message with main menu
         tg_send(
             chat_id, 
-            "✅ Đã cập nhật keyboard từ Sheet!\n\n"
+            "✅ Đã cập nhật bản mới nhấttt!\n\n"
             "🎊 <b>Menu đã được refresh</b>",
             build_main_keyboard()
         )
