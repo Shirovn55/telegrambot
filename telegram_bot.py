@@ -1487,33 +1487,34 @@ def format_tongket_message(stats):
 ━━━━━━━━━━━━━━━━━━
 🎟️ <b>VOUCHER ĐÃ LƯU</b>"""
 
-    # ===== CHỈ SỬA ĐOẠN DƯỚI NÀY =====
+    # ================== CHỈ SỬA PHẦN NÀY ==================
 
-    if stats["voucher_details"]:
-        DISPLAY_NAME = {
-            "voucher100k": "💎 Mã 100k 0đ",
-            "voucher50max200": "🎁 Mã 50% Max 200k",
-            "voucher50max100": "🎁 Mã 50% Max 100k",
-            "voucherHoaToc": "🚀 Freeship Hỏa Tốc",
-            "COMBO1": "🎆 COMBO1 | 100k + Ship HT",
-        }
+    # Gộp lượt lưu theo TÊN NÚT (bỏ 1/1, 5/5, 3/3...)
+    grouped = {}
+    for key, count in stats["voucher_details"].items():
+        base = key.split("_")[0]   # ví dụ: voucher100k_5_5 -> voucher100k
+        grouped.setdefault(base, 0)
+        grouped[base] += count
 
-        total = 0
+    DISPLAY_NAME = {
+        "voucher100k": "💎 Mã 100k 0đ",
+        "voucher30k": "🎁 Mã 30k",
+        "voucher50max100": "🎁 Mã 50% Max 100k",
+        "voucher50max200": "🎁 Mã 50% Max 200k",
+        "voucherHoaToc": "🚀 Freeship Hỏa Tốc",
+        "COMBO1": "🎆 COMBO1 | 100k + Ship HT",
+    }
 
-        for key, count in sorted(
-            stats["voucher_details"].items(),
-            key=lambda x: x[1],
-            reverse=True
-        ):
-            name = DISPLAY_NAME.get(key, key)
-            msg += f"\n• {name}: <b>{count}</b> lượt"
-            total += count
+    total = 0
 
-        msg += f"\n\n<b>━ Tổng: {total} lượt lưu</b>"
-    else:
-        msg += "\n<i>Chưa có lượt lưu nào</i>"
+    for base, count in sorted(grouped.items(), key=lambda x: x[1], reverse=True):
+        name = DISPLAY_NAME.get(base, base)
+        msg += f"\n• {name}: <b>{count}</b> lượt"
+        total += count
 
-    # ===== GIỮ NGUYÊN PHẦN USER =====
+    msg += f"\n\n<b>━ Tổng: {total} lượt lưu</b>"
+
+    # ================== GIỮ NGUYÊN USER ==================
     msg += f"""
 
 ━━━━━━━━━━━━━━━━━━
@@ -1522,6 +1523,7 @@ def format_tongket_message(stats):
 """
 
     return msg
+
 
 
 def handle_tongket_command(chat_id, user_id):
