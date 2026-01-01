@@ -187,6 +187,14 @@ while retry_count < MAX_RETRIES and not connected:
 # =========================================================
 PENDING_VOUCHER = {}    # user_id -> cmd
 COMBO1_KEY = "combo1"
+COMBO2_KEY = "combo2"
+COMBO3_KEY = "combo3"
+
+# =========================================================
+# ⭐⭐⭐ GIFT CONFIG - CHỈ TẶNG 1 LẦN ⭐⭐⭐
+# =========================================================
+FIRST_TIME_GIFT = 5000  # 5k cho user mới
+GIFT_STATUS_RECEIVED = "gift_received"  # Đánh dấu đã nhận quà
 
 # ✅ SPAM TRACKER (in-memory, sync to sheet on ban)
 SPAM_TRACKER = {}  # user_id -> {"errors": [timestamp], "ban_count": 0}
@@ -254,13 +262,12 @@ def tg_answer_callback(callback_id, text=None, show_alert=False):
 def build_main_keyboard():
     return {
         "keyboard": [
-            ["🎊 Kích Hoạt Tặng 5k", "💎 Nạp tiền"],
+            ["💎 Nạp tiền"],
             ["💰 Số dư", "🎁 Lưu Voucher"],
             ["🧩 Hệ Thống Bot NgânMiu"]
         ],
         "resize_keyboard": True
     }
-
 # =========================================================
 # UTIL
 # =========================================================
@@ -547,7 +554,8 @@ def notify_admin_spam(user_id, username, ban_type, error_count):
     
     try:
         # Lấy thông tin user
-        row, balance, status = get_user_data(user_id)
+        # Lấy thông tin user
+        row, balance, status, gift_received = get_user_data(user_id)
         
         # Format ban info
         if ban_type == "PERMANENT":
@@ -615,51 +623,164 @@ def apply_ban(user_id, ban_type):
 # =========================================================
 # USER / MONEY UTIL
 # =========================================================
-def get_user_row(user_id):
+# =========================================================
+# ⭐⭐⭐ FIX DUPLICATE USER - CORE FUNCTIONS ⭐⭐⭐
+# =========================================================
+def get_all_user_rows(user_id):
+    """Tìm TẤT CẢ các dòng có cùng user_id"""
     if not SHEET_READY:
-        return None
+        return []
+    
     try:
-        ids = ws_money.col_values(1)
-        return ids.index(str(user_id)) + 1 if str(user_id) in ids else None
-    except Exception:
-        return None
+        all_data = ws_money.get_all_values()
+        rows = []
+        
+        for idx, row in enumerate(all_data, start=1):
+            if idx == 1:  # Skip header
+                continue
+            if len(row) > 0 and str(row[0]).strip() == str(user_id).strip():
+                rows.append(idx)
+        
+        return rows
+    except Exception as e:
+        dprint(f"get_all_user_rows error: {e}")
+        return []
 
-def ensure_user_exists(user_id, username):
+def get_user_row(user_id):
+    """Tìm dòng ĐÚNG của user (dòng đầu tiên nếu có duplicate)"""
     if not SHEET_READY:
         return None
+    
+    rows = get_all_user_rows(user_id)
+    return rows[0] if rows else None
 
-    row = get_user_row(user_id)
-    if row:
-        return row
-
+def remove_duplicate_users(user_id):
+    """
+    ⭐ XÓA TẤT CẢ DUPLICATE CỦA 1 USER, CHỈ GIỮ LẠI DÒNG ĐẦU TIÊN ⭐
+    """
+    if not SHEET_READY:
+        return False
+    
+    try:
+        rows = get_all_user_rows(user_id)
+        
+        if len(rows) <= 1:
+            dprint(f"✅ User {user_id}: No duplicates")
+            return True
+        
+        dprint(f"⚠️ User {user_id}: Found {len(rows)} duplicates at rows {rows}")
+        
+        # Đọc data từ tất cả dòng
+        total_balance = 0
+        username = ""
+        status = "active"
+        gift_status = ""
+        
+        for row_idx in rows:
+            row_data = ws_money.row_values(row_idx)
+            
+            if len(row_data) > 2 and str(row_data[2]).isdigit():
+                total_balance += int(row_data[2])
+            
+            if len(row_data) > 1 and row_data[1]:
+                username = row_data[1]
+            
+            if len(row_data) > 3 and row_data[3]:
+                if row_data[3] == "active":
+                    status = "active"
+            
+            # Check gift status (cột G - index 6)
+            if len(row_data) > 6 and row_data[6] == GIFT_STATUS_RECEIVED:
+                gift_status = GIFT_STATUS_RECEIVED
+        
+        # Giữ lại dòng đầu tiên, update data
+        first_row = rows[0]
+        ws_money.update(f'A{first_row}:G{first_row}', [[
+            str(user_id),
+            username,
+            total_balance,
+            status,
+            "auto từ bot",
+            "",  # Cột F - Note/Ban
+            gift_status  # Cột G - Gift Status
+        ]])
+        
+        dprint(f"✅ Updated row {first_row}: balance={total_balance}, status={status}, gift={gift_status}")
+        
+        # Xóa các dòng duplicate (từ dưới lên)
+        for row_idx in reversed(rows[1:]):
+            ws_money.delete_rows(row_idx)
+            dprint(f"🗑️ Deleted duplicate row {row_idx}")
+        
+        dprint(f"✅ Cleaned {len(rows)-1} duplicates for user {user_id}")
+        return True
+        
+    except Exception as e:
+        dprint(f"remove_duplicate_users error: {e}")
+        return False
+def ensure_user_exists(user_id, username):
+    """
+    ✅ IMPROVED: Tạo user mới hoặc trả về dòng hiện tại
+    - Kiểm tra duplicate và clean up
+    - CHỈ TẶNG 5K KHI TẠO MỚI
+    """
+    if not SHEET_READY:
+        return None
+    
+    # Check xem user đã tồn tại chưa
+    existing_rows = get_all_user_rows(user_id)
+    
+    if existing_rows:
+        # Nếu có duplicate → clean up
+        if len(existing_rows) > 1:
+            dprint(f"⚠️ Found {len(existing_rows)} duplicates for {user_id}, cleaning...")
+            remove_duplicate_users(user_id)
+        
+        return existing_rows[0]
+    
+    # Tạo user mới - TẶNG 5K
     try:
         ws_money.append_row([
             str(user_id),
             username,
-            0,
+            FIRST_TIME_GIFT,  # ⭐ TẶNG 5K
             "active",
-            "auto từ bot"
+            "auto từ bot",
+            "",  # Cột F - Note/Ban (để trống)
+            GIFT_STATUS_RECEIVED  # ⭐ Cột G - ĐÁNH DẤU ĐÃ NHẬN QUÀ
         ])
+        
+        dprint(f"✅ Created new user {user_id} with {FIRST_TIME_GIFT:,}đ gift")
+        
+        # Log
+        log_row(user_id, username, "NEW_USER_GIFT", str(FIRST_TIME_GIFT), "Tặng 5k user mới")
+        
+        return get_user_row(user_id)
+        
     except Exception as e:
         dprint("ensure_user_exists error:", e)
-
-    return get_user_row(user_id)
+        return None
 
 def get_user_data(user_id):
+    """Lấy thông tin user: (row, balance, status, gift_received)"""
     if not SHEET_READY:
-        return None, 0, ""
-
+        return None, 0, "", False
+    
     row = get_user_row(user_id)
     if not row:
-        return None, 0, ""
-
+        return None, 0, "", False
+    
     try:
         data = ws_money.row_values(row)
         balance = int(data[2]) if len(data) > 2 and str(data[2]).isdigit() else 0
-        status  = data[3] if len(data) > 3 else ""
-        return row, balance, status
-    except Exception:
-        return row, 0, ""
+        status = data[3] if len(data) > 3 else ""
+        # Cột G (index 6) - Gift Status
+        gift_received = (len(data) > 6 and data[6] == GIFT_STATUS_RECEIVED)
+        
+        return row, balance, status, gift_received
+    except Exception as e:
+        dprint(f"get_user_data error: {e}")
+        return row, 0, "", False
 
 def add_balance(user_id, amount):
     """✅ Optimized with batch update"""
@@ -918,9 +1039,11 @@ def process_combo1(cookie):
 
     return True, total_price, len(saved), len(vouchers), failed
 
-def process_combo1_multi_cookies(cookies):
+def process_combo_multi_cookies(combo_key, cookies):
     """
-    Process COMBO1 với nhiều cookie
+    ⭐ UNIVERSAL COMBO PROCESSOR - Hỗ trợ combo1, combo2, combo3 ⭐
+    
+    Process combo với nhiều cookie
     
     Returns:
         success: True/False
@@ -930,7 +1053,7 @@ def process_combo1_multi_cookies(cookies):
         vouchers_per_cookie: số voucher mỗi cookie
         failed_details: [(cookie_idx, voucher_name, reason)]
     """
-    vouchers, err = get_vouchers_by_combo(COMBO1_KEY)
+    vouchers, err = get_vouchers_by_combo(combo_key)
     if err:
         return False, err, 0, len(cookies), 0, []
     
@@ -955,13 +1078,11 @@ def process_combo1_multi_cookies(cookies):
             else:
                 dprint(f"✅ Cookie #{cookie_idx} - {voucher.get('Tên Mã')}: OK")
             
-            # Delay giữa các voucher
             time.sleep(0.1)
         
         if cookie_success:
             cookies_saved += 1
         
-        # Delay giữa các cookie
         if cookie_idx < len(cookies):
             time.sleep(0.2)
     
@@ -971,8 +1092,6 @@ def process_combo1_multi_cookies(cookies):
     total_price = cookies_saved * price_per_cookie
     
     return True, total_price, cookies_saved, len(cookies), len(vouchers), failed_details
-
-
 # =========================================================
 # ⭐ DYNAMIC VOUCHER KEYBOARD FROM SHEET ⭐
 # =========================================================
@@ -1300,46 +1419,7 @@ def build_quick_buy_keyboard(cmd):
         ]]
     }
 
-# =========================================================
-# KÍCH HOẠT + TẶNG 5K
-# =========================================================
-def handle_active_gift_5k(user_id, username):
-    if not SHEET_READY:
-        return False, "❌ Hệ thống đang lỗi."
 
-    row = get_user_row(user_id)
-
-    if not row:
-        row = ensure_user_exists(user_id, username)
-
-    data = ws_money.row_values(row)
-    status = data[3] if len(data) > 3 else ""
-
-    if status in ("active", "trial_used"):
-        return False, "⚠️ ACC đã kích hoạt và nhận khuyến mãi rồi."
-
-    # ✅ Batch update: status + balance cùng lúc
-    try:
-        current_balance = int(data[2]) if len(data) > 2 else 0
-        new_balance = current_balance + 5000
-        
-        # Single API call
-        ws_money.update(f'C{row}:D{row}', [[new_balance, "active"]])
-        
-        log_row(user_id, username, "ACTIVE_GIFT_5K", "5000", "Kích hoạt + tặng 5k")
-        
-        return True, new_balance
-    except Exception as e:
-        dprint("handle_active_gift_5k error:", e)
-        return False, "❌ Lỗi khi cập nhật"
-
-# =========================================================
-# CALLBACK QUERY HANDLER
-# =========================================================
-
-# =========================================================
-# TỔNG KẾT KINH DOANH
-# =========================================================
 
 # =========================================================
 # TỔNG KẾT KINH DOANH - ĐÚNG THEO CẤU TRÚC SHEET
@@ -1431,12 +1511,12 @@ def get_today_stats():
                                 stats["voucher_details"][voucher_name] = 0
                             stats["voucher_details"][voucher_name] += 1
                             stats["total_usage"] += 1
-                        
-                        # ĐẾM COMBO1
-                        elif action == "COMBO1":
-                            if "COMBO1" not in stats["voucher_details"]:
-                                stats["voucher_details"]["COMBO1"] = 0
-                            stats["voucher_details"]["COMBO1"] += 1
+                         
+                        # ⭐⭐ ĐẾM COMBO1, COMBO2, COMBO3 ⭐⭐
+                        elif action in ["COMBO1", "COMBO2", "COMBO3"]:
+                            if action not in stats["voucher_details"]:
+                                stats["voucher_details"][action] = 0
+                            stats["voucher_details"][action] += 1
                             stats["total_usage"] += 1
                 except:
                     continue
@@ -1481,9 +1561,13 @@ def format_tongket_message(stats):
         )
         
         for voucher_name, count in sorted_vouchers:
-            # Format tên đẹp
+           # ⭐⭐ FORMAT CHO 3 COMBO ⭐⭐
             if voucher_name == "COMBO1":
                 display_name = "🎁 COMBO1"
+            elif voucher_name == "COMBO2":
+                display_name = "🎁 COMBO2"
+            elif voucher_name == "COMBO3":
+                display_name = "🎁 COMBO3"
             elif "100k" in voucher_name.lower():
                 display_name = "💸 Mã 100k 0đ"
             elif "50max200" in voucher_name.lower():
@@ -1795,59 +1879,67 @@ def handle_update(update):
             # 🔓 MỞ KHÓA BROADCAST
             IS_BROADCASTING = False
 
-
-
-    # ===== /start =====
-    if text == "/start":
-        row = ensure_user_exists(user_id, username)
-        row, balance, status = get_user_data(user_id)
-
-        if status != "active" or balance == 0:
-            # ✅ Batch update
-            try:
-                new_bal = balance + 5000
-                ws_money.update(f'C{row}:D{row}', [[new_bal, "active"]])
-                
-                log_row(user_id, username, "AUTO_ACTIVE", "5000", "Auto kích hoạt khi /start")
-
-                tg_send(
-                    chat_id,
-                    f"🎉 <b>KÍCH HOẠT THÀNH CÔNG</b>\n\n"
-                    f"🆔 ID: <code>{user_id}</code>\n"
-                    f"🎁 +5.000đ\n"
-                    f"💰 Số dư: <b>{new_bal:,}đ</b>",
-                    build_main_keyboard()
-                )
-            except Exception as e:
-                dprint("/start error:", e)
-                # ✅ Track lỗi
-                if track_error(user_id, username):
-                    tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
-        else:
-            tg_send(chat_id, "👋 <b>Chào mừng quay lại!</b>", build_main_keyboard())
+# ⭐⭐⭐ /cleandup - XÓA DUPLICATE (ADMIN ONLY) ⭐⭐⭐
+    if text == "/cleandup":
+        if user_id != ADMIN_ID:
+            tg_send(chat_id, "⛔ Chỉ admin")
+            return
+        
+        tg_send(chat_id, "⏳ Đang quét và xóa duplicate...")
+        
+        try:
+            all_data = ws_money.get_all_values()
+            seen_ids = set()
+            duplicate_count = 0
+            
+            for idx, row in enumerate(all_data, start=1):
+                if idx == 1:  # Skip header
+                    continue
+                if len(row) > 0:
+                    user_id_str = str(row[0]).strip()
+                    if user_id_str in seen_ids:
+                        duplicate_count += 1
+                    else:
+                        seen_ids.add(user_id_str)
+            
+            if duplicate_count == 0:
+                tg_send(chat_id, "✅ Không tìm thấy duplicate")
+                return
+            
+            # Clean từng user
+            cleaned = 0
+            for uid in seen_ids:
+                try:
+                    uid_int = int(uid)
+                    if remove_duplicate_users(uid_int):
+                        cleaned += 1
+                except:
+                    continue
+            
+            tg_send(chat_id, f"✅ Đã xóa {duplicate_count} duplicate!\n✅ Clean {cleaned} users")
+        except Exception as e:
+            tg_send(chat_id, f"❌ Lỗi: {e}")
+        
         return
 
-    # ===== KÍCH HOẠT + TẶNG 5K =====
-    if text in ("🎊 Kích Hoạt Tặng 5k", "🎁 Kích Hoạt Tặng 5k"):
-        ok, result = handle_active_gift_5k(user_id, username)
-
-        if not ok:
-            tg_send(chat_id, result)
-            # ✅ Track lỗi
-            if track_error(user_id, username):
-                tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
-            return
+# ===== /start =====
+    if text == "/start":
+        # ✅ ensure_user_exists đã tự động tặng 5k cho user mới
+        row = ensure_user_exists(user_id, username)
+        row, balance, status, gift_received = get_user_data(user_id)
 
         tg_send(
             chat_id,
-            f"🎉 <b>KÍCH HOẠT THÀNH CÔNG</b>\n\n"
+            f"👋 Chào mừng!\n\n"
             f"🆔 ID: <code>{user_id}</code>\n"
-            f"🎁 Khuyến mãi: <b>+5.000đ</b>\n"
-            f"💰 Số dư hiện tại: <b>{result:,}đ</b>\n\n"
-            f"👉 <b>Bấm nút bên dưới để sử dụng ngay</b>",
+            f"💰 Số dư: <b>{balance:,}đ</b>\n"
+            f"📊 Trạng thái: <b>{status}</b>",
             build_main_keyboard()
         )
         return
+
+    # ===== KÍCH HOẠT + TẶNG 5K =====
+
 
     # ===== NẠP TIỀN (CHỈ SEPAY) =====
     if text in ("💎 Nạp tiền", "💳 Nạp tiền"):
@@ -1872,23 +1964,22 @@ def handle_update(update):
 
         tg_send_photo(chat_id, qr, caption)
         return
-
-    # ===== USER DATA =====
-    row, balance, status = get_user_data(user_id)
+# ===== USER DATA =====
+    row, balance, status, gift_received = get_user_data(user_id)
     if not row:
         tg_send(chat_id, "❌ Bạn chưa có ID. Bấm /start để kích hoạt.")
         return
 
-    # ===== SỐ DƯ =====
+# ===== SỐ DƯ =====
     if text in ("💰 Số dư", "/balance"):
         tg_send(
             chat_id,
-            f"💰 <b>Số dư:</b> <b>{balance:,}đ</b>\n"
-            f"📌 Trạng thái: <b>{status}</b>",
+            f"💰 <b>Số dư:</b> {balance:,}đ\n"
+            f"📌 Trạng thái: <b>{status}</b>\n"
+            f"🎁 Đã nhận quà: <b>{'Có' if gift_received else 'Chưa'}</b>",
             build_main_keyboard()
         )
         return
-
     # ===== LỊCH SỬ =====
     if text == "🧩 Hệ Thống Bot NgânMiu":
         tg_send(
@@ -1948,12 +2039,12 @@ def handle_update(update):
         num_cookies = len(cookies)
         dprint(f"📊 Received {num_cookies} cookies")
 
-        # ----- COMBO1 -----
-        if cmd == COMBO1_KEY:
-            ok, total_price, cookies_saved, total_cookies, vouchers_per_cookie, failed = process_combo1_multi_cookies(cookies)
+   # ⭐⭐ COMBO1, COMBO2, COMBO3 ⭐⭐
+        if cmd in [COMBO1_KEY, COMBO2_KEY, COMBO3_KEY]:
+            ok, total_price, cookies_saved, total_cookies, vouchers_per_cookie, failed = process_combo_multi_cookies(cmd, cookies)
 
             if not ok:
-                tg_send(chat_id, f"❌ <b>COMBO1 THẤT BẠI</b>\n{total_price}")
+                tg_send(chat_id, f"❌ <b>{cmd.upper()} THẤT BẠI</b>\n{total_price}")
                 if track_error(user_id):
                     tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
                 return
@@ -1967,15 +2058,15 @@ def handle_update(update):
             new_bal = balance - total_price
             ws_money.update_cell(row, 3, new_bal)
 
-            log_row(user_id, username, "COMBO1", str(total_price), f"Lưu COMBO1 {cookies_saved}/{total_cookies} thành công")
+            log_row(user_id, username, cmd.upper(), str(total_price), f"Lưu {cmd.upper()} {cookies_saved}/{total_cookies} thành công")
 
             if cookies_saved == total_cookies:
-                msg_text = f"✅ Lưu COMBO1 <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
+                msg_text = f"✅ Lưu {cmd.upper()} <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
             else:
-                msg_text = f"⚠️ Lưu COMBO1 <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
+                msg_text = f"⚠️ Lưu {cmd.upper()} <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
 
             tg_send(chat_id, msg_text)
-            tg_send(chat_id, "👉 <b>Bấm để lưu tiếp nhanh</b>", build_quick_buy_keyboard("combo1"))
+            tg_send(chat_id, "👉 <b>Bấm để lưu tiếp nhanh</b>", build_quick_buy_keyboard(cmd))
             return
 
         # ----- VOUCHER ĐƠN -----
@@ -2032,35 +2123,31 @@ def handle_update(update):
     cmd = parts[0].replace("/", "")
     cookie_text = parts[1] if len(parts) > 1 else ""
 
-    # ----- COMBO1 -----
-    if cmd == COMBO1_KEY:
+# ⭐⭐ COMBO1, COMBO2, COMBO3 ⭐⭐
+    if cmd in [COMBO1_KEY, COMBO2_KEY, COMBO3_KEY]:
         if not cookie_text:
-            # ✅ Xóa lệnh cũ
             if user_id in PENDING_VOUCHER:
                 dprint(f"Cleared old pending: {PENDING_VOUCHER[user_id]}")
             
-            PENDING_VOUCHER[user_id] = COMBO1_KEY
+            PENDING_VOUCHER[user_id] = cmd
             tg_send(
                 chat_id,
-                "👉 Gửi <b>cookie</b> để lưu combo1\n\n"
-                "⭐ <b>Hỗ trợ lưu tối đa 10 cookie</b>\n"
-                "💡 Gửi mỗi cookie 1 dòng"
+                f"👉 Gửi <b>cookie</b> để lưu {cmd}\n\n"
+                f"⭐ <b>Hỗ trợ lưu tối đa 10 cookie</b>\n"
+                f"💡 Gửi mỗi cookie 1 dòng"
             )
             return
 
-        # ⭐ PARSE MULTIPLE COOKIES
         cookies = parse_cookies(cookie_text)
         
         if not cookies:
             tg_send(chat_id, "❌ Không tìm thấy cookie hợp lệ")
             return
-        
-        num_cookies = len(cookies)
 
-        ok, total_price, cookies_saved, total_cookies, vouchers_per_cookie, failed = process_combo1_multi_cookies(cookies)
+        ok, total_price, cookies_saved, total_cookies, vouchers_per_cookie, failed = process_combo_multi_cookies(cmd, cookies)
 
         if not ok:
-            tg_send(chat_id, f"❌ COMBO1 THẤT BẠI\n{total_price}")
+            tg_send(chat_id, f"❌ {cmd.upper()} THẤT BẠI\n{total_price}")
             if track_error(user_id):
                 tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
             return
@@ -2074,12 +2161,12 @@ def handle_update(update):
         new_bal = balance - total_price
         ws_money.update_cell(row, 3, new_bal)
 
-        log_row(user_id, username, "COMBO1", str(total_price), f"Lưu COMBO1 {cookies_saved}/{total_cookies} thành công")
+        log_row(user_id, username, cmd.upper(), str(total_price), f"Lưu {cmd.upper()} {cookies_saved}/{total_cookies} thành công")
 
         if cookies_saved == total_cookies:
-            msg_text = f"✅ Lưu COMBO1 <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
+            msg_text = f"✅ Lưu {cmd.upper()} <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
         else:
-            msg_text = f"⚠️ Lưu COMBO1 <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
+            msg_text = f"⚠️ Lưu {cmd.upper()} <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
 
         tg_send(chat_id, msg_text, build_main_keyboard())
         return
