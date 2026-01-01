@@ -251,15 +251,32 @@ def tg_answer_callback(callback_id, text=None, show_alert=False):
 # =========================================================
 # KEYBOARD
 # =========================================================
-def build_main_keyboard():
-    return {
-        "keyboard": [
-            ["🎊 Kích Hoạt Tặng 5k", "💎 Nạp tiền"],
-            ["💰 Số dư", "🎁 Lưu Voucher"],
-            ["🧩 Hệ Thống Bot NgânMiu"]
-        ],
-        "resize_keyboard": True
-    }
+def build_main_keyboard(is_active=True):
+    """
+    Build main keyboard based on user status
+    is_active: True = đã kích hoạt (ẩn nút kích hoạt)
+               False = chưa kích hoạt (hiện nút kích hoạt)
+    """
+    if is_active:
+        # User đã kích hoạt - ẨN NÚT KÍCH HOẠT
+        return {
+            "keyboard": [
+                ["💎 Nạp tiền"],
+                ["💰 Số dư", "🎁 Lưu Voucher"],
+                ["🧩 Hệ Thống Bot NgânMiu"]
+            ],
+            "resize_keyboard": True
+        }
+    else:
+        # User chưa kích hoạt - HIỆN NÚT KÍCH HOẠT
+        return {
+            "keyboard": [
+                ["🎊 Kích Hoạt Tặng 5k", "💎 Nạp tiền"],
+                ["💰 Số dư", "🎁 Lưu Voucher"],
+                ["🧩 Hệ Thống Bot NgânMiu"]
+            ],
+            "resize_keyboard": True
+        }
 
 # =========================================================
 # UTIL
@@ -1070,7 +1087,7 @@ def build_voucher_keyboard_from_sheet():
         combo_price = 0
         combo_count = 0
         
-        info_lines = ["🎊 <b>VOUCHER HIỆN CÓ - HAPPY NEW YEAR 2026!</b> 🎊\n━━━━━━━━━━━━━━━"]
+        info_lines = ["🎊 <b>VOUCHER HIỆN CÓ - HAPPY NEW YEAR 2025!</b> 🎊\n━━━━━━━━━━━━━━━"]
         
         for idx, row in enumerate(all_rows, 1):
             dprint(f"Row {idx}: {row.get('Tên Mã', 'N/A')}")
@@ -1450,7 +1467,7 @@ def get_today_stats():
     return stats
 
 def format_tongket_message(stats):
-    """Format message tổng kết"""
+    """Format message tổng kết - CHI TIẾT TỪNG MÃ"""
     if not stats:
         return "❌ Không thể lấy dữ liệu"
     
@@ -1471,9 +1488,20 @@ def format_tongket_message(stats):
 ━━━━━━━━━━━━━━━━━━
 🎟️ <b>VOUCHER ĐÃ LƯU</b>"""
     
-    # Hiển thị chi tiết từng voucher
+    # Hiển thị chi tiết từng mã - NGẮN GỌN
     if stats["voucher_details"]:
-        # Sắp xếp theo số lượng
+        # Map tên mã sang tên hiển thị ngắn gọn
+        name_map = {
+            "voucher100k": "Mã 100k 0đ",
+            "voucher50max200": "Mã 50% Max 200k",
+            "voucher50max100": "Mã 50% Max 100k",
+            "voucherhoatoc": "Freeship Hỏa Tốc",
+            "voucher30k": "Mã 30k",
+            "voucher20k": "Mã 20k",
+            "combo1": "COMBO1",
+        }
+        
+        # Sắp xếp theo số lượng giảm dần
         sorted_vouchers = sorted(
             stats["voucher_details"].items(), 
             key=lambda x: x[1], 
@@ -1481,23 +1509,36 @@ def format_tongket_message(stats):
         )
         
         for voucher_name, count in sorted_vouchers:
-            # Format tên đẹp
-            if voucher_name == "COMBO1":
-                display_name = "🎁 COMBO1"
-            elif "100k" in voucher_name.lower():
-                display_name = "💸 Mã 100k 0đ"
-            elif "50max200" in voucher_name.lower():
-                display_name = "💸 Mã 50% Max 200k"
-            elif "hoatoc" in voucher_name.lower():
-                display_name = "🚀 Freeship Hỏa Tốc"
-            else:
-                display_name = f"🎫 {voucher_name}"
+            # Tìm tên hiển thị
+            display_name = None
+            voucher_lower = voucher_name.lower().replace(" ", "")
             
-            msg += f"\n• {display_name}: <b>{count}</b> lượt"
+            for key, value in name_map.items():
+                if key in voucher_lower:
+                    display_name = value
+                    break
+            
+            # Nếu không tìm thấy trong map, dùng tên gốc
+            if not display_name:
+                display_name = voucher_name
+            
+            # Thêm icon
+            if "combo" in voucher_lower:
+                icon = "🎁"
+            elif "100k" in voucher_lower:
+                icon = "💎"
+            elif "50%" in voucher_lower or "50max" in voucher_lower:
+                icon = "✨"
+            elif "ship" in voucher_lower or "hoa" in voucher_lower:
+                icon = "🚀"
+            else:
+                icon = "🎫"
+            
+            msg += f"\n• {icon} {display_name}: <b>{count}</b> lượt"
         
         msg += f"\n\n<b>━ Tổng: {stats['total_usage']} lượt lưu</b>"
     else:
-        msg += "\n<i>Chưa có voucher nào được lưu</i>"
+        msg += "\n<i>Chưa có voucher nào</i>"
     
     msg += f"\n\n━━━━━━━━━━━━━━━━━━\n👥 <b>USER HOẠT ĐỘNG</b>\n• Tổng: <b>{stats['active_users']}</b> user"
     
@@ -1678,9 +1719,9 @@ def handle_update(update):
         # Send success message with main menu
         tg_send(
             chat_id, 
-            "✅ Đã cập nhật bản mới nhấttt!\n\n"
+            "✅ Đã cập nhật keyboard từ Sheet!\n\n"
             "🎊 <b>Menu đã được refresh</b>",
-            build_main_keyboard()
+            build_main_keyboard(is_active=True)
         )
         
         # Show voucher keyboard luôn
@@ -1816,7 +1857,7 @@ def handle_update(update):
                     f"🆔 ID: <code>{user_id}</code>\n"
                     f"🎁 +5.000đ\n"
                     f"💰 Số dư: <b>{new_bal:,}đ</b>",
-                    build_main_keyboard()
+                    build_main_keyboard(is_active=True)  # ✅ Đã active
                 )
             except Exception as e:
                 dprint("/start error:", e)
@@ -1824,7 +1865,11 @@ def handle_update(update):
                 if track_error(user_id, username):
                     tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
         else:
-            tg_send(chat_id, "👋 <b>Chào mừng quay lại!</b>", build_main_keyboard())
+            tg_send(
+                chat_id, 
+                "👋 <b>Chào mừng quay lại!</b>", 
+                build_main_keyboard(is_active=True)  # ✅ Đã active
+            )
         return
 
     # ===== KÍCH HOẠT + TẶNG 5K =====
@@ -1845,7 +1890,7 @@ def handle_update(update):
             f"🎁 Khuyến mãi: <b>+5.000đ</b>\n"
             f"💰 Số dư hiện tại: <b>{result:,}đ</b>\n\n"
             f"👉 <b>Bấm nút bên dưới để sử dụng ngay</b>",
-            build_main_keyboard()
+            build_main_keyboard(is_active=True)  # ✅ Ẩn nút kích hoạt
         )
         return
 
@@ -1885,32 +1930,13 @@ def handle_update(update):
             chat_id,
             f"💰 <b>Số dư:</b> <b>{balance:,}đ</b>\n"
             f"📌 Trạng thái: <b>{status}</b>",
-            build_main_keyboard()
+            build_main_keyboard(is_active=True)
         )
         return
 
     # ===== LỊCH SỬ =====
-    if text == "🧩 Hệ Thống Bot NgânMiu":
-        tg_send(
-            chat_id,
-            "🧩 <b>HỆ THỐNG BOT NGÂNMIU</b>\n\n"
-            "👉 <b>Danh sách Bot:</b>\n\n"
-            "🟠 <b>Bot Lưu Voucher</b>\n"
-            "├ Lưu voucher Shopee tự động\n"
-            "└ @nganmiu_bot\n\n"
-            "🟢 <b>Bot Check Đơn Hàng</b>\n"
-            "├ Check đơn hàng Shopee\n"
-            "├ Tra mã vận đơn SPX/GHN\n"
-            "└ @ShopeexCheck_Bot\n\n"
-            "🔵 <b>Bot Thuê Số</b>\n"
-            "├ Thuê số điện thoại ảo\n"
-            "└ Sắp mở 🚧\n\n"
-            "━━━━━━━━━━━━━━━\n"
-            "👥 <b>Group Hỗ Trợ:</b>\n"
-            "https://t.me/botxshopee\n\n"
-            "🌟 <i>Book Đơn Mã New tại NgânMiu.Store</i>",
-            build_main_keyboard()
-        )
+    if text in ("📜 Lịch sử nạp tiền", "/topup_history"):
+        tg_send(chat_id, topup_history_text(user_id))
         return
 
     # ===== VOUCHER =====
@@ -2081,7 +2107,7 @@ def handle_update(update):
         else:
             msg_text = f"⚠️ Lưu COMBO1 <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
 
-        tg_send(chat_id, msg_text, build_main_keyboard())
+        tg_send(chat_id, msg_text, build_main_keyboard(is_active=True))
         return
 
     # ----- VOUCHER ĐƠN -----
@@ -2145,14 +2171,14 @@ def handle_update(update):
         else:
             msg_text = f"⚠️ Lưu <b>{success_count}/{total_count}</b> thành công | -{actual_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
 
-        tg_send(chat_id, msg_text, build_main_keyboard())
+        tg_send(chat_id, msg_text, build_main_keyboard(is_active=True))
         return
 
     # ===== FALLBACK =====
     tg_send(
         chat_id,
         "❌ <b>Lệnh không hợp lệ</b>\nDùng /start để xem menu.",
-        build_main_keyboard()
+        build_main_keyboard(is_active=True)
     )
 
 # =========================================================
