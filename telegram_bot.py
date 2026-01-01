@@ -1467,13 +1467,12 @@ def get_today_stats():
     return stats
 
 def format_tongket_message(stats):
-    """Format message tổng kết - CHI TIẾT TỪNG MÃ"""
     if not stats:
         return "❌ Không thể lấy dữ liệu"
-    
+
     today_str = datetime.now(VIETNAM_TZ).strftime("%d/%m/%Y")
     total_in = stats["napten_amount"] + stats["napten_bonus"]
-    
+
     msg = f"""📊 <b>BÁO CÁO TỔNG KẾT</b>
 📅 {today_str}
 
@@ -1487,62 +1486,43 @@ def format_tongket_message(stats):
 
 ━━━━━━━━━━━━━━━━━━
 🎟️ <b>VOUCHER ĐÃ LƯU</b>"""
-    
-    # Hiển thị chi tiết từng mã - NGẮN GỌN
+
+    # ===== CHỈ SỬA ĐOẠN DƯỚI NÀY =====
+
     if stats["voucher_details"]:
-        # Map tên mã sang tên hiển thị ngắn gọn
-        name_map = {
-            "voucher100k": "Mã 100k 0đ",
-            "voucher50max200": "Mã 50% Max 200k",
-            "voucher50max100": "Mã 50% Max 100k",
-            "voucherhoatoc": "Freeship Hỏa Tốc",
-            "voucher30k": "Mã 30k",
-            "voucher20k": "Mã 20k",
-            "combo1": "COMBO1",
+        DISPLAY_NAME = {
+            "voucher100k": "💎 Mã 100k 0đ",
+            "voucher50max200": "🎁 Mã 50% Max 200k",
+            "voucher50max100": "🎁 Mã 50% Max 100k",
+            "voucherHoaToc": "🚀 Freeship Hỏa Tốc",
+            "COMBO1": "🎆 COMBO1 | 100k + Ship HT",
         }
-        
-        # Sắp xếp theo số lượng giảm dần
-        sorted_vouchers = sorted(
-            stats["voucher_details"].items(), 
-            key=lambda x: x[1], 
+
+        total = 0
+
+        for key, count in sorted(
+            stats["voucher_details"].items(),
+            key=lambda x: x[1],
             reverse=True
-        )
-        
-        for voucher_name, count in sorted_vouchers:
-            # Tìm tên hiển thị
-            display_name = None
-            voucher_lower = voucher_name.lower().replace(" ", "")
-            
-            for key, value in name_map.items():
-                if key in voucher_lower:
-                    display_name = value
-                    break
-            
-            # Nếu không tìm thấy trong map, dùng tên gốc
-            if not display_name:
-                display_name = voucher_name
-            
-            # Thêm icon
-            if "combo" in voucher_lower:
-                icon = "🎁"
-            elif "100k" in voucher_lower:
-                icon = "💎"
-            elif "50%" in voucher_lower or "50max" in voucher_lower:
-                icon = "✨"
-            elif "ship" in voucher_lower or "hoa" in voucher_lower:
-                icon = "🚀"
-            else:
-                icon = "🎫"
-            
-            msg += f"\n• {icon} {display_name}: <b>{count}</b> lượt"
-        
-        msg += f"\n\n<b>━ Tổng: {stats['total_usage']} lượt lưu</b>"
+        ):
+            name = DISPLAY_NAME.get(key, key)
+            msg += f"\n• {name}: <b>{count}</b> lượt"
+            total += count
+
+        msg += f"\n\n<b>━ Tổng: {total} lượt lưu</b>"
     else:
-        msg += "\n<i>Chưa có voucher nào</i>"
-    
-    msg += f"\n\n━━━━━━━━━━━━━━━━━━\n👥 <b>USER HOẠT ĐỘNG</b>\n• Tổng: <b>{stats['active_users']}</b> user"
-    
+        msg += "\n<i>Chưa có lượt lưu nào</i>"
+
+    # ===== GIỮ NGUYÊN PHẦN USER =====
+    msg += f"""
+
+━━━━━━━━━━━━━━━━━━
+👥 <b>USER HOẠT ĐỘNG</b>
+• Tổng: <b>{stats['active_users']}</b> user
+"""
+
     return msg
+
 
 def handle_tongket_command(chat_id, user_id):
     """Xử lý lệnh /tongket"""
