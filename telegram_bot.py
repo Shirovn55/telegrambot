@@ -1844,56 +1844,80 @@ def handle_update(update):
         row = ensure_user_exists(user_id, username)
         row, balance, status = get_user_data(user_id)
 
-        if status != "active" or balance == 0:
-            # ✅ Batch update
-            try:
-                new_bal = balance + 5000
-                ws_money.update(f'C{row}:D{row}', [[new_bal, "active"]])
-                
-                log_row(user_id, username, "AUTO_ACTIVE", "5000", "Auto kích hoạt khi /start")
-
-                tg_send(
-                    chat_id,
-                    f"🎉 <b>KÍCH HOẠT THÀNH CÔNG</b>\n\n"
-                    f"🆔 ID: <code>{user_id}</code>\n"
-                    f"🎁 +5.000đ\n"
-                    f"💰 Số dư: <b>{new_bal:,}đ</b>",
-                    build_main_keyboard(is_active=True)  # ✅ Đã active
-                )
-            except Exception as e:
-                dprint("/start error:", e)
-                # ✅ Track lỗi
-                if track_error(user_id, username):
-                    tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
-        else:
+        # ❌ ĐÃ ACTIVE → KHÔNG PHÁT TIỀN
+        if status == "active":
             tg_send(
-                chat_id, 
-                "👋 <b>Chào mừng quay lại!</b>", 
-                build_main_keyboard(is_active=True)  # ✅ Đã active
+                chat_id,
+                "👋 <b>Chào mừng quay lại!</b>",
+                build_main_keyboard(is_active=True)
             )
-        return
-
-    # ===== KÍCH HOẠT + TẶNG 5K =====
-    if text in ("🎊 Kích Hoạt Tặng 5k", "🎁 Kích Hoạt Tặng 5k"):
-        ok, result = handle_active_gift_5k(user_id, username)
-
-        if not ok:
-            tg_send(chat_id, result)
-            # ✅ Track lỗi
-            if track_error(user_id, username):
-                tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
             return
 
-        tg_send(
-            chat_id,
-            f"🎉 <b>KÍCH HOẠT THÀNH CÔNG</b>\n\n"
-            f"🆔 ID: <code>{user_id}</code>\n"
-            f"🎁 Khuyến mãi: <b>+5.000đ</b>\n"
-            f"💰 Số dư hiện tại: <b>{result:,}đ</b>\n\n"
-            f"👉 <b>Bấm nút bên dưới để sử dụng ngay</b>",
-            build_main_keyboard(is_active=True)  # ✅ Ẩn nút kích hoạt
-        )
+        # ✅ CHƯA ACTIVE → CHỈ SET ACTIVE, KHÔNG CỘNG TIỀN
+        try:
+            ws_money.update_cell(row, 4, "active")
+
+            log_row(
+                user_id,
+                username,
+                "AUTO_ACTIVE",
+                "",
+                "Active tài khoản (không KM)"
+            )
+
+            tg_send(
+                chat_id,
+                f"🎉 <b>KÍCH HOẠT THÀNH CÔNG</b>\n\n"
+                f"🆔 ID: <code>{user_id}</code>\n"
+                f"💡 Tài khoản đã được kích hoạt\n\n"
+                f"👉 <b>Bấm nút bên dưới để sử dụng</b>",
+                build_main_keyboard(is_active=True)
+            )
+        except Exception as e:
+            dprint("/start error:", e)
+
         return
+
+
+    def handle_active_gift_5k(user_id, username):
+        if not SHEET_READY:
+            return False, "❌ Hệ thống đang lỗi."
+
+        row = get_user_row(user_id)
+        if not row:
+            row = ensure_user_exists(user_id, username)
+
+        data = ws_money.row_values(row)
+        status = data[3] if len(data) > 3 else ""
+
+        # ❌ ĐÃ ACTIVE → CẤM NHẬN TIỀN
+        if status == "active":
+            return False, "⚠️ Tài khoản đã kích hoạt, không thể nhận khuyến mãi."
+
+        try:
+            current_balance = int(data[2]) if len(data) > 2 else 0
+            new_balance = current_balance + 5000
+
+            # ✅ SET ACTIVE + CỘNG TIỀN (1 LẦN DUY NHẤT)
+            ws_money.update(
+                f'C{row}:D{row}',
+                [[new_balance, "active"]]
+            )
+
+            log_row(
+                user_id,
+                username,
+                "ACTIVE_GIFT_5K",
+                "5000",
+                "Kích hoạt + nhận KM lần đầu"
+            )
+
+            return True, new_balance
+
+        except Exception as e:
+            dprint("handle_active_gift_5k error:", e)
+            return False, "❌ Lỗi khi kích hoạt"
+
 
     # ===== NẠP TIỀN (CHỈ SEPAY) =====
     if text in ("💎 Nạp tiền", "💳 Nạp tiền"):
