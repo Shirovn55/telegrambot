@@ -1466,6 +1466,8 @@ def get_today_stats():
     
     return stats
 
+import re
+
 def format_tongket_message(stats):
     if not stats:
         return "❌ Không thể lấy dữ liệu"
@@ -1487,12 +1489,29 @@ def format_tongket_message(stats):
 ━━━━━━━━━━━━━━━━━━
 🎟️ <b>VOUCHER ĐÃ LƯU</b>"""
 
-    # ================== CHỈ SỬA PHẦN NÀY ==================
+    # ================== GỘP LƯỢT LƯU THEO MÃ GỐC ==================
 
-    # Gộp lượt lưu theo TÊN NÚT (bỏ 1/1, 5/5, 3/3...)
     grouped = {}
-    for key, count in stats["voucher_details"].items():
-        base = key.split("_")[0]   # ví dụ: voucher100k_5_5 -> voucher100k
+
+    for raw_key, count in stats["voucher_details"].items():
+        raw = raw_key.lower()
+
+        # COMBO
+        if "combo1" in raw:
+            base = "COMBO1"
+
+        # voucherHoaToc / voucherHoaToc1 / voucherHoaToc2
+        elif "hoatoc" in raw:
+            base = "voucherHoaToc"
+
+        else:
+            # BẮT voucher + số (voucher100k, voucher30k, voucher50max100...)
+            m = re.search(r"(voucher[a-z0-9]+)", raw)
+            if m:
+                base = m.group(1)
+            else:
+                base = raw_key  # fallback (hiếm)
+
         grouped.setdefault(base, 0)
         grouped[base] += count
 
@@ -1506,7 +1525,6 @@ def format_tongket_message(stats):
     }
 
     total = 0
-
     for base, count in sorted(grouped.items(), key=lambda x: x[1], reverse=True):
         name = DISPLAY_NAME.get(base, base)
         msg += f"\n• {name}: <b>{count}</b> lượt"
@@ -1514,7 +1532,7 @@ def format_tongket_message(stats):
 
     msg += f"\n\n<b>━ Tổng: {total} lượt lưu</b>"
 
-    # ================== GIỮ NGUYÊN USER ==================
+    # ================== USER ==================
     msg += f"""
 
 ━━━━━━━━━━━━━━━━━━
@@ -1523,6 +1541,7 @@ def format_tongket_message(stats):
 """
 
     return msg
+
 
 
 
