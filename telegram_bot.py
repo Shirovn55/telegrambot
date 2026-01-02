@@ -650,15 +650,13 @@ def ensure_user_exists(user_id, username):
         return row
 
     try:
-        # ✅ User mới: status = "" (rỗng) để /start biết đây là user mới
         ws_money.append_row([
             str(user_id),
             username,
             0,
-            "",  # ← Status = RỖNG cho user mới
+            "active",
             "auto từ bot"
         ])
-        dprint(f"✅ Created NEW user: {user_id} (status='')")
     except Exception as e:
         dprint("ensure_user_exists error:", e)
 
@@ -1320,7 +1318,7 @@ def build_quick_buy_keyboard(cmd):
     }
 
 # =========================================================
-# KÍCH HOẠT + TẶNG 5.1K
+# KÍCH HOẠT + TẶNG 5K
 # =========================================================
 def handle_active_gift_5k(user_id, username):
     if not SHEET_READY:
@@ -1340,12 +1338,12 @@ def handle_active_gift_5k(user_id, username):
     # ✅ Batch update: status + balance cùng lúc
     try:
         current_balance = int(data[2]) if len(data) > 2 else 0
-        new_balance = current_balance + 5100  # ✅ 5.1K
+        new_balance = current_balance + 5000
         
         # Single API call
         ws_money.update(f'C{row}:D{row}', [[new_balance, "active"]])
         
-        log_row(user_id, username, "ACTIVE_GIFT_5K", "5100", "Kích hoạt + tặng 5.1k")
+        log_row(user_id, username, "ACTIVE_GIFT_5K", "5000", "Kích hoạt + tặng 5k")
         
         return True, new_balance
     except Exception as e:
@@ -1468,14 +1466,15 @@ def get_today_stats():
     
     return stats
 
+import re
+
 def format_tongket_message(stats):
-    """Format message tổng kết - CHI TIẾT TỪNG MÃ"""
     if not stats:
         return "❌ Không thể lấy dữ liệu"
-    
+
     today_str = datetime.now(VIETNAM_TZ).strftime("%d/%m/%Y")
     total_in = stats["napten_amount"] + stats["napten_bonus"]
-    
+
     msg = f"""📊 <b>BÁO CÁO TỔNG KẾT</b>
 📅 {today_str}
 
@@ -1489,62 +1488,62 @@ def format_tongket_message(stats):
 
 ━━━━━━━━━━━━━━━━━━
 🎟️ <b>VOUCHER ĐÃ LƯU</b>"""
-    
-    # Hiển thị chi tiết từng mã - NGẮN GỌN
-    if stats["voucher_details"]:
-        # Map tên mã sang tên hiển thị ngắn gọn
-        name_map = {
-            "voucher100k": "Mã 100k 0đ",
-            "voucher50max200": "Mã 50% Max 200k",
-            "voucher50max100": "Mã 50% Max 100k",
-            "voucherhoatoc": "Freeship Hỏa Tốc",
-            "voucher30k": "Mã 30k",
-            "voucher20k": "Mã 20k",
-            "combo1": "COMBO1",
-        }
-        
-        # Sắp xếp theo số lượng giảm dần
-        sorted_vouchers = sorted(
-            stats["voucher_details"].items(), 
-            key=lambda x: x[1], 
-            reverse=True
-        )
-        
-        for voucher_name, count in sorted_vouchers:
-            # Tìm tên hiển thị
-            display_name = None
-            voucher_lower = voucher_name.lower().replace(" ", "")
-            
-            for key, value in name_map.items():
-                if key in voucher_lower:
-                    display_name = value
-                    break
-            
-            # Nếu không tìm thấy trong map, dùng tên gốc
-            if not display_name:
-                display_name = voucher_name
-            
-            # Thêm icon
-            if "combo" in voucher_lower:
-                icon = "🎁"
-            elif "100k" in voucher_lower:
-                icon = "💎"
-            elif "50%" in voucher_lower or "50max" in voucher_lower:
-                icon = "✨"
-            elif "ship" in voucher_lower or "hoa" in voucher_lower:
-                icon = "🚀"
+
+    # ================== GỘP LƯỢT LƯU THEO MÃ GỐC ==================
+
+    grouped = {}
+
+    for raw_key, count in stats["voucher_details"].items():
+        raw = raw_key.lower()
+
+        # COMBO
+        if "combo1" in raw:
+            base = "COMBO1"
+
+        # voucherHoaToc / voucherHoaToc1 / voucherHoaToc2
+        elif "hoatoc" in raw:
+            base = "voucherHoaToc"
+
+        else:
+            # BẮT voucher + số (voucher100k, voucher30k, voucher50max100...)
+            m = re.search(r"(voucher[a-z0-9]+)", raw)
+            if m:
+                base = m.group(1)
             else:
-                icon = "🎫"
-            
-            msg += f"\n• {icon} {display_name}: <b>{count}</b> lượt"
-        
-        msg += f"\n\n<b>━ Tổng: {stats['total_usage']} lượt lưu</b>"
-    else:
-        msg += "\n<i>Chưa có voucher nào</i>"
-    
-    msg += f"\n\n━━━━━━━━━━━━━━━━━━\n👥 <b>USER HOẠT ĐỘNG</b>\n• Tổng: <b>{stats['active_users']}</b> user"
-    
+                base = raw_key  # fallback (hiếm)
+
+        grouped.setdefault(base, 0)
+        grouped[base] += count
+
+    DISPLAY_NAME = {
+        "voucher100k": "💎 Mã 100k 0đ",
+        "voucher30k": "🎁 Mã 30k",
+        "voucher50max100": "🎁 Mã 50% Max 100k",
+        "voucher50max200": "🎁 Mã 50% Max 200k",
+        "voucherHoaToc": "🚀 Freeship Hỏa Tốc",
+        "COMBO1": "🎆 COMBO1 | 100k + Ship HT",
+    }
+
+    total = 0
+    for base, count in sorted(grouped.items(), key=lambda x: x[1], reverse=True):
+        name = DISPLAY_NAME.get(base, base)
+        msg += f"\n• {name}: <b>{count}</b> lượt"
+        total += count
+
+    msg += f"\n\n<b>━ Tổng: {total} lượt lưu</b>"
+
+    # ================== USER ==================
+    msg += f"""
+
+━━━━━━━━━━━━━━━━━━
+👥 <b>USER HOẠT ĐỘNG</b>
+• Tổng: <b>{stats['active_users']}</b> user
+"""
+
     return msg
+
+
+
 
 def handle_tongket_command(chat_id, user_id):
     """Xử lý lệnh /tongket"""
@@ -1844,66 +1843,81 @@ def handle_update(update):
     if text == "/start":
         row = ensure_user_exists(user_id, username)
         row, balance, status = get_user_data(user_id)
-        
-        dprint(f"📊 /start DEBUG: user_id={user_id}, row={row}, balance={balance}, status='{status}'")
 
-        # ✅ CHỈ TẶNG 5.1K CHO USER MỚI (status KHÔNG PHẢI "active" hoặc "trial_used")
-        if status not in ("active", "trial_used"):
-            # User mới hoàn toàn
-            try:
-                new_bal = balance + 5100  # ✅ 5.1K để tránh balance = 0
-                dprint(f"💰 Tặng 5.1k cho user MỚI: {balance} → {new_bal}")
-                ws_money.update(f'C{row}:D{row}', [[new_bal, "active"]])
-                
-                log_row(user_id, username, "AUTO_ACTIVE", "5100", "Auto kích hoạt khi /start")
-
-                tg_send(
-                    chat_id,
-                    f"🎉 <b>KÍCH HOẠT THÀNH CÔNG</b>\n\n"
-                    f"🆔 ID: <code>{user_id}</code>\n"
-                    f"🎁 +5.100đ\n"
-                    f"💰 Số dư: <b>{new_bal:,}đ</b>",
-                    build_main_keyboard(is_active=True)  # ✅ ĐÃ ACTIVE - ẨN NÚT
-                )
-                dprint(f"✅ /start: Đã tặng 5.1k cho user MỚI {user_id}")
-            except Exception as e:
-                dprint(f"❌ /start error for {user_id}:", e)
-                import traceback
-                traceback.print_exc()
-                if track_error(user_id, username):
-                    tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
-        else:
-            # User đã active rồi
-            dprint(f"ℹ️ /start: User {user_id} ĐÃ ACTIVE (balance={balance}, status={status}) - KHÔNG TẶNG")
+        # ❌ ĐÃ ACTIVE → KHÔNG PHÁT TIỀN
+        if status == "active":
             tg_send(
-                chat_id, 
-                f"👋 <b>Chào mừng quay lại!</b>\n"
-                f"💰 Số dư: <b>{balance:,}đ</b>", 
-                build_main_keyboard(is_active=True)  # ✅ ĐÃ ACTIVE - ẨN NÚT
+                chat_id,
+                "👋 <b>Chào mừng quay lại!</b>",
+                build_main_keyboard(is_active=True)
             )
-        return
-
-    # ===== KÍCH HOẠT + TẶNG 5.1K =====
-    if text in ("🎊 Kích Hoạt Tặng 5k", "🎁 Kích Hoạt Tặng 5k"):
-        ok, result = handle_active_gift_5k(user_id, username)
-
-        if not ok:
-            tg_send(chat_id, result)
-            # ✅ Track lỗi
-            if track_error(user_id, username):
-                tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
             return
 
-        tg_send(
-            chat_id,
-            f"🎉 <b>KÍCH HOẠT THÀNH CÔNG</b>\n\n"
-            f"🆔 ID: <code>{user_id}</code>\n"
-            f"🎁 Khuyến mãi: <b>+5.100đ</b>\n"
-            f"💰 Số dư hiện tại: <b>{result:,}đ</b>\n\n"
-            f"👉 <b>Bấm nút bên dưới để sử dụng ngay</b>",
-            build_main_keyboard(is_active=True)  # ✅ Ẩn nút kích hoạt
-        )
+        # ✅ CHƯA ACTIVE → CHỈ SET ACTIVE, KHÔNG CỘNG TIỀN
+        try:
+            ws_money.update_cell(row, 4, "active")
+
+            log_row(
+                user_id,
+                username,
+                "AUTO_ACTIVE",
+                "",
+                "Active tài khoản (không KM)"
+            )
+
+            tg_send(
+                chat_id,
+                f"🎉 <b>KÍCH HOẠT THÀNH CÔNG</b>\n\n"
+                f"🆔 ID: <code>{user_id}</code>\n"
+                f"💡 Tài khoản đã được kích hoạt\n\n"
+                f"👉 <b>Bấm nút bên dưới để sử dụng</b>",
+                build_main_keyboard(is_active=True)
+            )
+        except Exception as e:
+            dprint("/start error:", e)
+
         return
+
+
+    def handle_active_gift_5k(user_id, username):
+        if not SHEET_READY:
+            return False, "❌ Hệ thống đang lỗi."
+
+        row = get_user_row(user_id)
+        if not row:
+            row = ensure_user_exists(user_id, username)
+
+        data = ws_money.row_values(row)
+        status = data[3] if len(data) > 3 else ""
+
+        # ❌ ĐÃ ACTIVE → CẤM NHẬN TIỀN
+        if status == "active":
+            return False, "⚠️ Tài khoản đã kích hoạt, không thể nhận khuyến mãi."
+
+        try:
+            current_balance = int(data[2]) if len(data) > 2 else 0
+            new_balance = current_balance + 5000
+
+            # ✅ SET ACTIVE + CỘNG TIỀN (1 LẦN DUY NHẤT)
+            ws_money.update(
+                f'C{row}:D{row}',
+                [[new_balance, "active"]]
+            )
+
+            log_row(
+                user_id,
+                username,
+                "ACTIVE_GIFT_5K",
+                "5000",
+                "Kích hoạt + nhận KM lần đầu"
+            )
+
+            return True, new_balance
+
+        except Exception as e:
+            dprint("handle_active_gift_5k error:", e)
+            return False, "❌ Lỗi khi kích hoạt"
+
 
     # ===== NẠP TIỀN (CHỈ SEPAY) =====
     if text in ("💎 Nạp tiền", "💳 Nạp tiền"):
