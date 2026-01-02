@@ -1320,7 +1320,7 @@ def build_quick_buy_keyboard(cmd):
     }
 
 # =========================================================
-# KÍCH HOẠT + TẶNG 5K
+# KÍCH HOẠT + TẶNG 5.1K
 # =========================================================
 def handle_active_gift_5k(user_id, username):
     if not SHEET_READY:
@@ -1340,12 +1340,12 @@ def handle_active_gift_5k(user_id, username):
     # ✅ Batch update: status + balance cùng lúc
     try:
         current_balance = int(data[2]) if len(data) > 2 else 0
-        new_balance = current_balance + 5000
+        new_balance = current_balance + 5100  # ✅ 5.1K
         
         # Single API call
         ws_money.update(f'C{row}:D{row}', [[new_balance, "active"]])
         
-        log_row(user_id, username, "ACTIVE_GIFT_5K", "5000", "Kích hoạt + tặng 5k")
+        log_row(user_id, username, "ACTIVE_GIFT_5K", "5100", "Kích hoạt + tặng 5.1k")
         
         return True, new_balance
     except Exception as e:
@@ -1847,26 +1847,25 @@ def handle_update(update):
         
         dprint(f"📊 /start DEBUG: user_id={user_id}, row={row}, balance={balance}, status='{status}'")
 
-        # ✅ CHỈ TẶNG 5K CHO USER MỚI (status KHÔNG PHẢI "active" hoặc "trial_used")
-        # User đã active + balance = 0 = ĐÃ DÙNG HẾT TIỀN → KHÔNG TẶNG LẠI
+        # ✅ CHỈ TẶNG 5.1K CHO USER MỚI (status KHÔNG PHẢI "active" hoặc "trial_used")
         if status not in ("active", "trial_used"):
-            # User mới hoàn toàn hoặc status rỗng
+            # User mới hoàn toàn
             try:
-                new_bal = balance + 5000
-                dprint(f"💰 Tặng 5k cho user MỚI: {balance} → {new_bal}")
+                new_bal = balance + 5100  # ✅ 5.1K để tránh balance = 0
+                dprint(f"💰 Tặng 5.1k cho user MỚI: {balance} → {new_bal}")
                 ws_money.update(f'C{row}:D{row}', [[new_bal, "active"]])
                 
-                log_row(user_id, username, "AUTO_ACTIVE", "5000", "Auto kích hoạt khi /start")
+                log_row(user_id, username, "AUTO_ACTIVE", "5100", "Auto kích hoạt khi /start")
 
                 tg_send(
                     chat_id,
                     f"🎉 <b>KÍCH HOẠT THÀNH CÔNG</b>\n\n"
                     f"🆔 ID: <code>{user_id}</code>\n"
-                    f"🎁 +5.000đ\n"
+                    f"🎁 +5.100đ\n"
                     f"💰 Số dư: <b>{new_bal:,}đ</b>",
-                    build_main_keyboard(is_active=True)
+                    build_main_keyboard(is_active=True)  # ✅ ĐÃ ACTIVE - ẨN NÚT
                 )
-                dprint(f"✅ /start: Đã tặng 5k cho user MỚI {user_id}")
+                dprint(f"✅ /start: Đã tặng 5.1k cho user MỚI {user_id}")
             except Exception as e:
                 dprint(f"❌ /start error for {user_id}:", e)
                 import traceback
@@ -1880,11 +1879,11 @@ def handle_update(update):
                 chat_id, 
                 f"👋 <b>Chào mừng quay lại!</b>\n"
                 f"💰 Số dư: <b>{balance:,}đ</b>", 
-                build_main_keyboard(is_active=True)
+                build_main_keyboard(is_active=True)  # ✅ ĐÃ ACTIVE - ẨN NÚT
             )
         return
 
-    # ===== KÍCH HOẠT + TẶNG 5K =====
+    # ===== KÍCH HOẠT + TẶNG 5.1K =====
     if text in ("🎊 Kích Hoạt Tặng 5k", "🎁 Kích Hoạt Tặng 5k"):
         ok, result = handle_active_gift_5k(user_id, username)
 
@@ -1899,7 +1898,7 @@ def handle_update(update):
             chat_id,
             f"🎉 <b>KÍCH HOẠT THÀNH CÔNG</b>\n\n"
             f"🆔 ID: <code>{user_id}</code>\n"
-            f"🎁 Khuyến mãi: <b>+5.000đ</b>\n"
+            f"🎁 Khuyến mãi: <b>+5.100đ</b>\n"
             f"💰 Số dư hiện tại: <b>{result:,}đ</b>\n\n"
             f"👉 <b>Bấm nút bên dưới để sử dụng ngay</b>",
             build_main_keyboard(is_active=True)  # ✅ Ẩn nút kích hoạt
