@@ -71,6 +71,12 @@ MIN_TOPUP_AMOUNT = 10000
 # ✅ TIỀN THƯỞNG USER MỚI (5100đ để balance không bao giờ về 0)
 NEW_USER_BONUS = 5100
 
+# ✅ TIỀN THƯỞNG KÍCH HOẠT (thống nhất với NEW_USER_BONUS)
+ACTIVE_GIFT_AMOUNT = 5100
+
+# ✅ STATUS CHO PHÉP NHẬN GIFT (chặt chẽ, tránh abuse)
+ALLOWED_GIFT_STATUS = ["", "new", "pending"]  # Admin set "inactive" → KHÔNG được nhận
+
 TOPUP_BONUS_RULES = [
     (100000, 0.20),
     (50000,  0.15),
@@ -394,6 +400,24 @@ def tg_answer_callback(callback_id, text=None, show_alert=False):
         requests.post(f"{BASE_URL}/answerCallbackQuery", data=payload, timeout=10)
     except Exception as e:
         dprint("tg_answer_callback error:", e)
+
+def tg_edit_message(chat_id, message_id, text, reply_markup=None):
+    """
+    Edit message text và inline keyboard
+    """
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "HTML"
+    }
+    if reply_markup:
+        payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+
+    try:
+        requests.post(f"{BASE_URL}/editMessageText", data=payload, timeout=10)
+    except Exception as e:
+        dprint("tg_edit_message error:", e)
 
 # =========================================================
 # KEYBOARD
@@ -795,7 +819,11 @@ def get_user_row(user_id):
 
 def ensure_user_exists(user_id, username):
     """
-    ✅ V4 FIXED: Append đúng 7 cột + cộng 5100đ cho user mới
+    ✅ V5: Tạo user MỚI với status = "new", balance = 0
+    User PHẢI BẤM NÚT "🎊 Kích Hoạt Tặng 5k" để nhận tiền
+    
+    → DUY NHẤT 1 LUỒNG KÍCH HOẠT (dễ quản lý)
+    
     Schema: Tele ID | Username | Balance | Trang Thái | Chi Chú | note | Gift Status
     """
     if not SHEET_READY:
@@ -806,20 +834,20 @@ def ensure_user_exists(user_id, username):
         return row
 
     try:
-        # ✅ FIXED: Append 7 cột + cộng 5100đ
+        # ✅ Tạo user mới: balance = 0, status = "new"
         ws_money.append_row([
             str(user_id),      # A: Tele ID
             username,          # B: Username
-            NEW_USER_BONUS,    # C: Balance (5100đ thưởng)
-            "active",          # D: Trang Thái
+            0,                 # C: Balance (0đ - chưa nhận thưởng)
+            "new",             # D: Trang Thái (new - chưa kích hoạt)
             "auto from bot",   # E: Chi Chú
             "",                # F: note (dùng cho ban/unban)
             ""                 # G: Gift Status
         ])
-        dprint(f"✅ Created new user {user_id} with {NEW_USER_BONUS:,}đ bonus")
+        dprint(f"✅ Created new user {user_id} with status=new (chưa kích hoạt)")
 
-        # ✅ Log thưởng user mới
-        log_row(user_id, username, "NEW_USER_BONUS", str(NEW_USER_BONUS), "Thưởng user mới")
+        # ✅ Log tạo user (KHÔNG log bonus ở đây)
+        log_row(user_id, username, "USER_CREATED", "0", "User mới tạo - chưa kích hoạt")
 
         # ✅ CACHE ROW NGAY
         try:
@@ -1486,6 +1514,15 @@ def build_quick_buy_keyboard(cmd):
 # KÍCH HOẠT + TẶNG 5K
 # =========================================================
 def handle_active_gift_5k(user_id, username):
+    """
+    ✅ Kích hoạt tài khoản + Tặng quà
+    
+    LOGIC:
+    - Chỉ user có status trong ALLOWED_GIFT_STATUS mới được nhận
+    - Admin set "inactive" → KHÔNG được nhận (tránh abuse)
+    - Dùng ACTIVE_GIFT_AMOUNT thống nhất
+    - Log riêng action "ACTIVE_GIFT_CLICK"
+    """
     if not SHEET_READY:
         return False, "❌ Hệ thống đang lỗi."
 
@@ -1496,25 +1533,39 @@ def handle_active_gift_5k(user_id, username):
     data = ws_money.row_values(row)
     status = data[3] if len(data) > 3 else ""
 
+    # ✅ CHECK 1: Đã active rồi
     if status == "active":
         return False, "⚠️ Tài khoản đã kích hoạt, không thể nhận khuyến mãi."
+    
+    # ✅ CHECK 2: Status không được phép (admin set "inactive", "banned", etc.)
+    if status not in ALLOWED_GIFT_STATUS:
+        dprint(f"⚠️ User {user_id} status '{status}' not allowed for gift")
+        return False, (
+            "❌ Tài khoản không đủ điều kiện nhận khuyến mãi.\n"
+            "📞 Vui lòng liên hệ admin: @BonBonxHPx"
+        )
 
     try:
         current_balance = int(data[2]) if len(data) > 2 else 0
-        new_balance = current_balance + 5000
+        
+        # ✅ FIX: Dùng ACTIVE_GIFT_AMOUNT thống nhất (5100đ)
+        new_balance = current_balance + ACTIVE_GIFT_AMOUNT
 
         ws_money.update(
             f'C{row}:D{row}',
             [[new_balance, "active"]]
         )
 
+        # ✅ LOG riêng action
         log_row(
             user_id,
             username,
-            "ACTIVE_GIFT_5K",
-            "5000",
-            "Kích hoạt + nhận KM lần đầu"
+            "ACTIVE_GIFT_CLICK",  # ← Riêng biệt với NEW_USER_BONUS
+            str(ACTIVE_GIFT_AMOUNT),
+            f"Kích hoạt thủ công + nhận {ACTIVE_GIFT_AMOUNT:,}đ"
         )
+        
+        dprint(f"✅ User {user_id} activated: +{ACTIVE_GIFT_AMOUNT:,}đ → {new_balance:,}đ")
 
         return True, new_balance
 
@@ -1575,6 +1626,63 @@ def handle_callback_query(cb):
             f"💡 Gửi mỗi cookie 1 dòng"
         )
         return
+
+    # ===== SYSTEM MENU CALLBACKS =====
+    if data.startswith("SYSTEM:"):
+        action = data.split(":")[1]
+        
+        if action == "bot_list":
+            bot_list_menu = {
+                "inline_keyboard": [
+                    [{"text": "🔴 Bot Lưu Voucher", "url": "https://t.me/nganmiu_bot"}],
+                    [{"text": "📦 Bot Check Đơn Hàng", "url": "https://t.me/ShopeeXCheck_Bot"}],
+                    [{"text": "📲 Bot Thuê Số (Sắp mở)", "callback_data": "SYSTEM:coming_soon"}],
+                    [{"text": "🔙 Quay lại", "callback_data": "SYSTEM:back"}],
+                ]
+            }
+            
+            tg_answer_callback(cb_id)
+            tg_edit_message(
+                chat_id,
+                cb_msg_id,
+                "📱 <b>DANH SÁCH BOT NGÂNMIU</b>\n\n"
+                "🤖 Hệ sinh thái bot của chúng tôi:\n\n"
+                "🔴 <b>Bot Lưu Voucher</b>\n"
+                "└ Lưu voucher Shopee tự động\n\n"
+                "📦 <b>Bot Check Đơn Hàng</b>\n"
+                "└ Kiểm tra trạng thái đơn hàng\n\n"
+                "📲 <b>Bot Thuê Số</b> (Sắp ra mắt)\n"
+                "└ Thuê số điện thoại nhận OTP",
+                bot_list_menu
+            )
+            return
+        
+        if action == "coming_soon":
+            tg_answer_callback(cb_id, "🚧 Tính năng đang phát triển!", True)
+            return
+        
+        if action == "back":
+            system_menu = {
+                "inline_keyboard": [
+                    [{"text": "👤 Admin hỗ trợ", "url": "https://t.me/BonBonxHPx"}],
+                    [{"text": "👥 Group Hỗ Trợ", "url": "https://t.me/botxshopee"}],
+                    [{"text": "📱 Danh sách Bot", "callback_data": "SYSTEM:bot_list"}],
+                    [{"text": "🔴 Bot Lưu Voucher", "url": "https://t.me/nganmiu_bot"}],
+                    [{"text": "📦 Bot Check Đơn Hàng", "url": "https://t.me/ShopeeXCheck_Bot"}],
+                    [{"text": "📲 Bot Thuê Số", "callback_data": "SYSTEM:coming_soon"}],
+                ]
+            }
+            
+            tg_answer_callback(cb_id)
+            tg_edit_message(
+                chat_id,
+                cb_msg_id,
+                "🏠 <b>HỆ THỐNG BOT NGÂNMIU</b>\n\n"
+                "👋 Chào mừng bạn đến với hệ sinh thái bot NgânMiu!\n\n"
+                "📌 <b>Chọn một trong các dịch vụ bên dưới:</b>",
+                system_menu
+            )
+            return
 
     tg_answer_callback(cb_id, "⚠️ Thao tác không hỗ trợ", True)
 
@@ -2022,17 +2130,17 @@ def handle_update(update):
         row = ensure_user_exists(user_id, username)
         row, balance, status = get_user_data(user_id)
 
-        # ✅ Message cho user mới (đã tự động active trong ensure_user_exists)
+        # ✅ Message cho user mới (status = "new", chưa kích hoạt)
         if is_new_user:
             tg_send(
                 chat_id,
                 f"🎉 <b>CHÀO MỪNG BẠN MỚI!</b>\n\n"
                 f"👋 Xin chào <b>{username or 'bạn'}</b>\n\n"
-                f"🎁 Bạn nhận được <b>{NEW_USER_BONUS:,}đ</b> thưởng!\n"
-                f"💼 Số dư: <b>{balance:,}đ</b>\n"
-                f"📊 Trạng thái: <b>{status}</b>\n\n"
-                f"🛒 Bấm nút bên dưới để bắt đầu mua voucher",
-                build_main_keyboard(is_active=True)
+                f"🎁 <b>NHẬN NGAY {ACTIVE_GIFT_AMOUNT:,}đ KHI KÍCH HOẠT!</b>\n\n"
+                f"👇 <b>Bấm nút bên dưới để kích hoạt:</b>\n"
+                f"   🎊 <b>Kích Hoạt Tặng 5k</b>\n\n"
+                f"💰 Sau khi kích hoạt, bạn có thể bắt đầu mua voucher!",
+                build_main_keyboard(is_active=False)
             )
             return
 
@@ -2046,15 +2154,34 @@ def handle_update(update):
             return
 
         # ⚠️ User cũ - KHÔNG active
-        # → KHÔNG tự động active (cần admin hoặc nạp tiền)
         tg_send(
             chat_id,
             "⚠️ <b>Tài khoản chưa được kích hoạt</b>\n\n"
             f"💼 Số dư: <b>{balance:,}đ</b>\n"
             f"📊 Trạng thái: <b>{status}</b>\n\n"
-            "📞 Liên hệ admin: @BonBonxHPx",
+            f"🎁 <b>NHẬN NGAY {ACTIVE_GIFT_AMOUNT:,}đ KHI KÍCH HOẠT!</b>\n\n"
+            f"👇 <b>Bấm nút bên dưới để kích hoạt:</b>\n"
+            f"   🎊 <b>Kích Hoạt Tặng 5k</b>\n\n"
+            f"📞 Hoặc liên hệ admin: @BonBonxHPx",
             build_main_keyboard(is_active=False)
         )
+        return
+
+    # ===== KÍCH HOẠT TẶNG 5K =====
+    if text == "🎊 Kích Hoạt Tặng 5k":
+        success, result = handle_active_gift_5k(user_id, username)
+        
+        if success:
+            tg_send(
+                chat_id,
+                f"🎉 <b>KÍCH HOẠT THÀNH CÔNG!</b>\n\n"
+                f"🎁 Bạn nhận được <b>{ACTIVE_GIFT_AMOUNT:,}đ</b> khuyến mãi!\n"
+                f"💼 Số dư mới: <b>{result:,}đ</b>\n\n"
+                f"🛒 Bấm <b>🎁 Lưu Voucher</b> để bắt đầu mua sắm!",
+                build_main_keyboard(is_active=True)
+            )
+        else:
+            tg_send(chat_id, result, build_main_keyboard(is_active=True))
         return
 
     # ===== NẠP TIỀN =====
@@ -2089,17 +2216,56 @@ def handle_update(update):
 
     # ===== SỐ DƯ =====
     if text in ("💰 Số dư", "/balance"):
+        # ✅ RATE LIMIT: 1 lần/3s per user
+        last_balance_check = CALLBACK_COOLDOWN.get(f"balance_{user_id}", 0)
+        if time.time() - last_balance_check < 3:
+            dprint(f"⏳ Balance check rate-limited: user {user_id}")
+            return  # Silent ignore (không spam user)
+        
+        CALLBACK_COOLDOWN[f"balance_{user_id}"] = time.time()
+        
+        # ✅ FORCE REFRESH - User có thể vừa nạp tiền
+        row, balance, status = get_user_data(user_id, force_refresh=True)
+        
+        if not row:
+            tg_send(chat_id, "❌ Không tìm thấy tài khoản. Bấm /start để kích hoạt.")
+            return
+        
+        dprint(f"💰 Check balance for user {user_id}: {balance:,}đ (status: {status})")
+        
         tg_send(
             chat_id,
             f"💰 <b>Số dư:</b> <b>{balance:,}đ</b>\n"
             f"📌 Trạng thái: <b>{status}</b>",
-            build_main_keyboard(is_active=True)
+            build_main_keyboard(is_active=(status == "active"))
         )
         return
 
     # ===== LỊCH SỬ =====
     if text in ("📜 Lịch sử nạp tiền", "/topup_history"):
         tg_send(chat_id, topup_history_text(user_id))
+        return
+
+    # ===== HỆ THỐNG BOT =====
+    if text == "🧩 Hệ Thống Bot NgânMiu":
+        system_menu = {
+            "inline_keyboard": [
+                [{"text": "👤 Admin hỗ trợ", "url": "https://t.me/BonBonxHPx"}],
+                [{"text": "👥 Group Hỗ Trợ", "url": "https://t.me/botxshopee"}],
+                [{"text": "📱 Danh sách Bot", "callback_data": "SYSTEM:bot_list"}],
+                [{"text": "🔴 Bot Lưu Voucher", "url": "https://t.me/nganmiu_bot"}],
+                [{"text": "📦 Bot Check Đơn Hàng", "url": "https://t.me/ShopeeXCheck_Bot"}],
+                [{"text": "📲 Bot Thuê Số", "callback_data": "SYSTEM:coming_soon"}],
+            ]
+        }
+        
+        tg_send(
+            chat_id,
+            "🏠 <b>HỆ THỐNG BOT NGÂNMIU</b>\n\n"
+            "👋 Chào mừng bạn đến với hệ sinh thái bot NgânMiu!\n\n"
+            "📌 <b>Chọn một trong các dịch vụ bên dưới:</b>",
+            system_menu
+        )
         return
 
     # ===== VOUCHER =====
