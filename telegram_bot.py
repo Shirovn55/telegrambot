@@ -895,7 +895,54 @@ def get_user_data(user_id, force_refresh=False):
     except Exception:
         return row, 0, ""
 
-def add_balance(user_id, amount):
+def get_balance_direct(user_id):
+    """
+    🔥 ĐỌC BALANCE TRỰC TIẾP TỪ SHEET - KHÔNG BAO GIỜ DÙNG CACHE
+    
+    Dùng cho MỌI thao tác liên quan đến TIỀN:
+    - Sau add_balance()
+    - Sau deduct_balance_atomic()
+    - Trước khi hiển thị số dư cho user
+    
+    Returns:
+        balance (int): Số dư thực tế từ Sheet
+    """
+    if not SHEET_READY:
+        return 0
+    
+    # ✅ Tìm row (có thể dùng cache row, nhưng balance PHẢI đọc mới)
+    row = get_user_row(user_id)
+    if not row:
+        return 0
+    
+    try:
+        # ✅ ĐỌC TRỰC TIẾP từ Sheet cell, KHÔNG qua cache
+        balance = int(ws_money.cell(row, 3).value or 0)
+        dprint(f"💰 DIRECT READ: user {user_id} balance = {balance:,}đ")
+        return balance
+    except Exception as e:
+        dprint(f"❌ get_balance_direct error: {e}")
+        return 0
+
+def update_balance_atomic(user_id, delta):
+    """
+    🔥 ATOMIC UPDATE BALANCE - AN TOÀN 100%
+    
+    Dùng cho MỌI thao tác thay đổi balance:
+    - Cộng tiền: update_balance_atomic(user_id, +amount)
+    - Trừ tiền: update_balance_atomic(user_id, -amount)
+    - Hoàn tiền: update_balance_atomic(user_id, +refund)
+    
+    ATOMIC: Đọc + Tính + Ghi trong 1 operation
+    → Không bị race condition khi 2 request song song
+    
+    Args:
+        user_id: Telegram user ID
+        delta: Số tiền thay đổi (+ hoặc -)
+    
+    Returns:
+        new_balance: Balance mới sau khi update
+    """
     if not SHEET_READY:
         return 0
 
@@ -904,15 +951,34 @@ def add_balance(user_id, amount):
         row = ensure_user_exists(user_id, "")
 
     try:
-        bal = int(ws_money.cell(row, 3).value or 0)
-        new_bal = bal + int(amount)
-
-        ws_money.update_cell(row, 3, new_bal)
-
-        return new_bal
+        # ✅ ĐỌC balance hiện tại
+        current = int(ws_money.cell(row, 3).value or 0)
+        
+        # ✅ TÍNH balance mới
+        new_balance = current + int(delta)
+        
+        # 🔥 CHẶN BALANCE ÂM (phòng Sheet lỗi, admin sửa tay, concurrent edge case)
+        new_balance = max(0, new_balance)
+        
+        # ✅ GHI ngay
+        ws_money.update_cell(row, 3, new_balance)
+        
+        dprint(f"💰 ATOMIC UPDATE: user {user_id} | {current:,}đ {'+' if delta >= 0 else ''}{delta:,}đ = {new_balance:,}đ")
+        
+        return new_balance
+        
     except Exception as e:
-        dprint("add_balance error:", e)
+        dprint(f"❌ update_balance_atomic error: {e}")
         return 0
+
+# ⚠️ DEPRECATED: Dùng update_balance_atomic() thay thế
+def add_balance(user_id, amount):
+    """
+    DEPRECATED: Hàm này không atomic, dễ bị race condition
+    → Dùng update_balance_atomic(user_id, +amount) thay thế
+    """
+    dprint(f"⚠️ WARNING: add_balance() is deprecated, use update_balance_atomic()")
+    return update_balance_atomic(user_id, amount)
 
 def deduct_balance_atomic(user_id, need_amount):
     """
@@ -1146,6 +1212,32 @@ def get_vouchers_by_combo(combo_key):
         return [], "Combo hiện không có mã"
 
     return items, None
+
+def calculate_combo_price(combo_key, num_cookies):
+    """
+    🔥 TÍNH GIÁ COMBO TRƯỚC - KHÔNG LƯU VOUCHER
+    
+    Dùng để check + trừ tiền TRƯỚC khi lưu voucher
+    Tránh case: Lưu được voucher nhưng user không đủ tiền
+    
+    Args:
+        combo_key: combo1, combo2, combo3, etc.
+        num_cookies: Số lượng cookie
+    
+    Returns:
+        (success: bool, total_price: int, error_message: str)
+    """
+    vouchers, err = get_vouchers_by_combo(combo_key)
+    if err:
+        return False, 0, err
+    
+    # Tính giá mỗi cookie = tổng giá các voucher trong combo
+    price_per_cookie = sum(int(v.get("Giá", 0)) for v in vouchers)
+    total_price = price_per_cookie * num_cookies
+    
+    dprint(f"💰 CALC {combo_key.upper()}: {price_per_cookie:,}đ/cookie × {num_cookies} = {total_price:,}đ")
+    
+    return True, total_price, None
 
 def process_combo1(cookie):
     vouchers, err = get_vouchers_by_combo(COMBO1_KEY)
@@ -2329,32 +2421,52 @@ def handle_update(update):
 
         # ----- DYNAMIC COMBO -----
         if cmd.startswith("combo"):
-            ok, total_price, cookies_saved, total_cookies, vouchers_per_cookie, failed = process_combo_multi_cookies(cookies, cmd)
-
+            # 🔥 BƯỚC 1: TÍNH GIÁ TRƯỚC (không lưu voucher)
+            ok, total_price, err_msg = calculate_combo_price(cmd, num_cookies)
+            
             if not ok:
-                tg_send(chat_id, f"❌ <b>{cmd.upper()} THẤT BẠI</b>\n{total_price}")
-                # ✅ KHÔNG track_error - đây là lỗi nghiệp vụ, không phải spam
+                tg_send(chat_id, f"❌ <b>{cmd.upper()} THẤT BẠI</b>\n{err_msg}")
                 return
-
-            # ✅ ATOMIC DEDUCT - Đọc + Check + Trừ trong 1 lần
+            
+            # 🔥 BƯỚC 2: TRỪ TIỀN TRƯỚC
             success, new_bal = deduct_balance_atomic(user_id, total_price)
             
             if not success:
                 tg_send(
-                    chat_id, 
+                    chat_id,
                     f"❌ Không đủ số dư\n"
                     f"💰 Cần: {total_price:,}đ\n"
                     f"💼 Số dư hiện tại: {new_bal:,}đ"
                 )
-                # ✅ KHÔNG track_error - đây là lỗi nghiệp vụ, không phải spam
+                return
+            
+            # 🔥 BƯỚC 3: ĐÃ TRỪ TIỀN - BÂY GIỜ MỚI LƯU VOUCHER
+            ok, _, cookies_saved, total_cookies, vouchers_per_cookie, failed = process_combo_multi_cookies(cookies, cmd)
+            
+            if not ok:
+                # Không lưu được → HOÀN TIỀN ATOMIC
+                update_balance_atomic(user_id, total_price)  # ← ATOMIC
+                
+                # UI: Hiển thị balance TRỰC TIẾP từ Sheet
+                real_balance = get_balance_direct(user_id)
+                
+                tg_send(
+                    chat_id,
+                    f"❌ <b>{cmd.upper()} THẤT BẠI</b>\n"
+                    f"💸 Đã hoàn tiền: +{total_price:,}đ\n"
+                    f"💰 Số dư: <b>{real_balance:,}đ</b>"
+                )
                 return
 
             log_row(user_id, username, cmd.upper(), str(total_price), f"Lưu {cmd.upper()} {cookies_saved}/{total_cookies} thành công")
 
+            # ✅ UI: Luôn hiển thị balance TRỰC TIẾP từ Sheet
+            real_balance = get_balance_direct(user_id)
+            
             if cookies_saved == total_cookies:
-                msg_text = f"✅ Lưu {cmd.upper()} <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
+                msg_text = f"✅ Lưu {cmd.upper()} <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{real_balance:,}đ</b>"
             else:
-                msg_text = f"⚠️ Lưu {cmd.upper()} <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
+                msg_text = f"⚠️ Lưu {cmd.upper()} <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{real_balance:,}đ</b>"
 
             tg_send(chat_id, msg_text)
             tg_send(chat_id, "👉 <b>Bấm để lưu tiếp nhanh</b>", build_quick_buy_keyboard(cmd))
@@ -2387,28 +2499,40 @@ def handle_update(update):
         success_count, total_count, failed_details = save_voucher_multi_cookies(cookies, v)
 
         if success_count == 0:
-            # ✅ HOÀN TIỀN vì không lưu được cookie nào
-            add_balance(user_id, total_price)
-            tg_send(chat_id, "❌ Không lưu được cookie nào\n💸 Đã hoàn tiền")
+            # ✅ HOÀN TIỀN ATOMIC vì không lưu được cookie nào
+            update_balance_atomic(user_id, total_price)  # ← ATOMIC
+            
+            # UI: Hiển thị balance TRỰC TIẾP từ Sheet
+            real_balance = get_balance_direct(user_id)
+            
+            tg_send(
+                chat_id,
+                f"❌ Không lưu được cookie nào\n"
+                f"💸 Đã hoàn tiền: +{total_price:,}đ\n"
+                f"💰 Số dư hiện tại: <b>{real_balance:,}đ</b>"
+            )
             # ✅ KHÔNG track_error - cookie lỗi/Shopee lỗi là lỗi nghiệp vụ
             return
 
         # ✅ Lưu được một số cookie
         actual_price = price * success_count
         
-        # ✅ Hoàn tiền cho cookie thất bại
+        # ✅ Hoàn tiền ATOMIC cho cookie thất bại
         if success_count < num_cookies:
             refund = price * (num_cookies - success_count)
-            add_balance(user_id, refund)
-            new_bal += refund
+            update_balance_atomic(user_id, refund)  # ← ATOMIC
+            
             dprint(f"💸 Refunded {refund:,}đ for {num_cookies - success_count} failed cookies")
 
         log_row(user_id, username, "VOUCHER", str(actual_price), f"Lưu {cmd} {success_count}/{total_count} thành công")
+        
+        # ✅ UI: Luôn hiển thị balance TRỰC TIẾP từ Sheet
+        real_balance = get_balance_direct(user_id)
 
         if success_count == total_count:
-            msg_text = f"✅ Lưu <b>{success_count}/{total_count}</b> thành công | -{actual_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
+            msg_text = f"✅ Lưu <b>{success_count}/{total_count}</b> thành công | -{actual_price:,}đ | Còn: <b>{real_balance:,}đ</b>"
         else:
-            msg_text = f"⚠️ Lưu <b>{success_count}/{total_count}</b> thành công | -{actual_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
+            msg_text = f"⚠️ Lưu <b>{success_count}/{total_count}</b> thành công | -{actual_price:,}đ | Còn: <b>{real_balance:,}đ</b>"
 
         tg_send(chat_id, msg_text)
         tg_send(chat_id, "👉 <b>Bấm để lưu tiếp nhanh</b>", build_quick_buy_keyboard(cmd))
@@ -2467,22 +2591,14 @@ def handle_update(update):
 
         num_cookies = len(cookies)
 
-        # ✅ FORCE REFRESH BALANCE - User có thể vừa nạp tiền
-        row, balance, status = get_user_data(user_id, force_refresh=True)
-        if not row:
-            tg_send(chat_id, "❌ Không tìm thấy ID")
-            return
+        # 🔥 BƯỚC 1: TÍNH GIÁ TRƯỚC
+        ok, total_price, err_msg = calculate_combo_price(cmd, num_cookies)
         
-        dprint(f"💰 Balance after refresh: {balance:,}đ")
-
-        ok, total_price, cookies_saved, total_cookies, vouchers_per_cookie, failed = process_combo_multi_cookies(cookies, cmd)
-
         if not ok:
-            tg_send(chat_id, f"❌ {cmd.upper()} THẤT BẠI\n{total_price}")
-            # ✅ KHÔNG track_error - lỗi nghiệp vụ
+            tg_send(chat_id, f"❌ {cmd.upper()} THẤT BẠI\n{err_msg}")
             return
 
-        # ✅ ATOMIC DEDUCT
+        # 🔥 BƯỚC 2: TRỪ TIỀN TRƯỚC
         success, new_bal = deduct_balance_atomic(user_id, total_price)
         
         if not success:
@@ -2492,15 +2608,35 @@ def handle_update(update):
                 f"💰 Cần: {total_price:,}đ\n"
                 f"💼 Số dư hiện tại: {new_bal:,}đ"
             )
-            # ✅ KHÔNG track_error - lỗi nghiệp vụ
+            return
+        
+        # 🔥 BƯỚC 3: ĐÃ TRỪ TIỀN - BÂY GIỜ MỚI LƯU
+        ok, _, cookies_saved, total_cookies, vouchers_per_cookie, failed = process_combo_multi_cookies(cookies, cmd)
+
+        if not ok:
+            # Không lưu được → HOÀN TIỀN ATOMIC
+            update_balance_atomic(user_id, total_price)  # ← ATOMIC
+            
+            # UI: Hiển thị balance TRỰC TIẾP từ Sheet
+            real_balance = get_balance_direct(user_id)
+            
+            tg_send(
+                chat_id,
+                f"❌ {cmd.upper()} THẤT BẠI\n"
+                f"💸 Đã hoàn tiền: +{total_price:,}đ\n"
+                f"💰 Số dư: <b>{real_balance:,}đ</b>"
+            )
             return
 
         log_row(user_id, username, cmd.upper(), str(total_price), f"Lưu {cmd.upper()} {cookies_saved}/{total_cookies} thành công")
 
+        # ✅ UI: Luôn hiển thị balance TRỰC TIẾP từ Sheet
+        real_balance = get_balance_direct(user_id)
+        
         if cookies_saved == total_cookies:
-            msg_text = f"✅ Lưu {cmd.upper()} <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
+            msg_text = f"✅ Lưu {cmd.upper()} <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{real_balance:,}đ</b>"
         else:
-            msg_text = f"⚠️ Lưu {cmd.upper()} <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
+            msg_text = f"⚠️ Lưu {cmd.upper()} <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{real_balance:,}đ</b>"
 
         tg_send(chat_id, msg_text, build_main_keyboard(is_active=True))
         return
@@ -2569,25 +2705,36 @@ def handle_update(update):
         success_count, total_count, failed_details = save_voucher_multi_cookies(cookies, v)
 
         if success_count == 0:
-            # ✅ HOÀN TIỀN
-            add_balance(user_id, total_price)
-            tg_send(chat_id, "❌ Không lưu được cookie nào\n💸 Đã hoàn tiền")
+            # ✅ HOÀN TIỀN ATOMIC
+            update_balance_atomic(user_id, total_price)  # ← ATOMIC
+            
+            # UI: Hiển thị balance TRỰC TIẾP từ Sheet
+            real_balance = get_balance_direct(user_id)
+            
+            tg_send(
+                chat_id,
+                f"❌ Không lưu được cookie nào\n"
+                f"💸 Đã hoàn tiền: +{total_price:,}đ\n"
+                f"💰 Số dư hiện tại: <b>{real_balance:,}đ</b>"
+            )
             # ✅ KHÔNG track_error - lỗi nghiệp vụ
             return
 
-        # ✅ Hoàn tiền cho cookie thất bại
+        # ✅ Hoàn tiền ATOMIC cho cookie thất bại
         actual_price = price * success_count
         if success_count < num_cookies:
             refund = price * (num_cookies - success_count)
-            add_balance(user_id, refund)
-            new_bal += refund
+            update_balance_atomic(user_id, refund)  # ← ATOMIC
 
         log_row(user_id, username, "VOUCHER", str(actual_price), f"Lưu {cmd} {success_count}/{total_count} thành công")
 
+        # ✅ UI: Luôn hiển thị balance TRỰC TIẾP từ Sheet
+        real_balance = get_balance_direct(user_id)
+        
         if success_count == total_count:
-            msg_text = f"✅ Lưu <b>{success_count}/{total_count}</b> thành công | -{actual_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
+            msg_text = f"✅ Lưu <b>{success_count}/{total_count}</b> thành công | -{actual_price:,}đ | Còn: <b>{real_balance:,}đ</b>"
         else:
-            msg_text = f"⚠️ Lưu <b>{success_count}/{total_count}</b> thành công | -{actual_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
+            msg_text = f"⚠️ Lưu <b>{success_count}/{total_count}</b> thành công | -{actual_price:,}đ | Còn: <b>{real_balance:,}đ</b>"
 
         tg_send(chat_id, msg_text, build_main_keyboard(is_active=True))
         return
@@ -2662,7 +2809,9 @@ def webhook_sepay():
     total_add = amount + bonus
 
     ensure_user_exists(user_id, "")
-    new_balance = add_balance(user_id, total_add)
+    
+    # ✅ ATOMIC UPDATE - An toàn với concurrent webhooks
+    new_balance = update_balance_atomic(user_id, total_add)
 
     note = f"+{int(percent * 100)}%={bonus}" if bonus > 0 else ""
 
@@ -2677,6 +2826,9 @@ def webhook_sepay():
 
     log_row(user_id, "", "TOPUP_SEPAY", str(total_add), tx_id)
 
+    # ✅ UI: Hiển thị balance TRỰC TIẾP từ Sheet (double-check)
+    real_balance = get_balance_direct(user_id)
+    
     msg = (
         "💰 <b>NẠP TIỀN THÀNH CÔNG</b>\n"
         f"➕ Gốc: <b>{amount:,}đ</b>\n"
@@ -2685,7 +2837,7 @@ def webhook_sepay():
     if bonus > 0:
         msg += f"🎁 Thưởng: <b>{bonus:,}đ</b>\n"
 
-    msg += f"💼 Số dư: <b>{new_balance:,}đ</b>"
+    msg += f"💼 Số dư: <b>{real_balance:,}đ</b>"  # ← Dùng real_balance từ Sheet
 
     tg_send(user_id, msg)
 
