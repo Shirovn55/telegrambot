@@ -1258,7 +1258,15 @@ def build_voucher_keyboard_from_sheet():
                 current_row_buttons = []
                 current_row_num = row_num
 
-            ten_hien_thi = str(voucher.get("Tên hiển thị", "")).strip()
+            # ✅ Hỗ trợ nhiều tên cột display name
+            ten_hien_thi = ""
+            for key in ["Display Name", "Tên hiển thị", "Tên Hiển Thị", "display_name"]:
+                if key in voucher:
+                    ten_hien_thi = str(voucher[key]).strip()
+                    if ten_hien_thi:
+                        break
+            
+            # Fallback nếu không có display name
             if not ten_hien_thi:
                 ten_hien_thi = str(voucher.get("Tên Mã", "")).strip()
 
@@ -1269,13 +1277,12 @@ def build_voucher_keyboard_from_sheet():
             is_sold_out = trang_thai != "Còn Mã"
 
             if is_sold_out:
-                button_text = f"⚫ {apply_strikethrough(ten_hien_thi)} (Hết)"
+                # ✅ Giảm độ dài text - bỏ emoji, chỉ giữ "Hết"
+                button_text = f"{ten_hien_thi} (Hết)"
                 callback_data = f"SOLD_OUT:{ten_ma}"
             else:
-                new_year_emojis = ["🎊", "🎉", "✨", "🎁", "🔥", "⭐", "💫"]
-                import random
-                emoji = random.choice(new_year_emojis)
-                button_text = f"{emoji} {ten_hien_thi}"
+                # ✅ Giảm emoji, text ngắn hơn cho mobile
+                button_text = f"🎊 {ten_hien_thi}"
                 callback_data = f"BUY:{ten_ma}"
 
             current_row_buttons.append({
@@ -1297,18 +1304,18 @@ def build_voucher_keyboard_from_sheet():
             for combo_key in sorted(combos_data.keys()):
                 combo_info = combos_data[combo_key]
                 
-                # Tên hiển thị
+                # ✅ Tên hiển thị NGẮN hơn cho mobile
                 combo_display_names = {
-                    "combo1": "🎆 COMBO1 | Mã 100k + Ship HT 🎆",
-                    "combo2": "🎆 COMBO2 | Combo Giảm Giá 🎆",
-                    "combo3": "🎆 COMBO3 | Combo Freeship 🎆",
+                    "combo1": "🎆 COMBO1 | 100k+Ship",
+                    "combo2": "🎆 COMBO2 | Giảm Giá",
+                    "combo3": "🎆 COMBO3 | Freeship",
                 }
                 
                 # Fallback: COMBO{N} nếu không có trong map
                 combo_num = combo_key.replace("combo", "")
                 display_name = combo_display_names.get(
                     combo_key,
-                    f"🎆 COMBO{combo_num.upper()} | Combo Đặc Biệt 🎆"
+                    f"🎆 COMBO{combo_num.upper()}"
                 )
                 
                 # Thêm nút
