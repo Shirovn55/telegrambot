@@ -1,14 +1,12 @@
 # -*- coding: utf-8 -*-
 """
 NgânMiu.Store — Telegram Bot
-✅ V4 FIXED - Sửa schema 7 cột + Anti-spam 5req/20s + Thưởng user mới 5100đ
-✅ Schema 7 cột: Tele ID | Username | Balance | Trang Thái | Chi Chú | note | Gift Status
-✅ Anti-spam: 5 request/20s → Ban 1H → Tái phạm → Ban vĩnh viễn
-✅ Thưởng user mới: 5100đ (balance không bao giờ về 0)
+✅ PHIÊN BẢN TỐI ƯU - FIXED ALL ISSUES
+✅ Anti-spam: 15 lỗi/1 phút → Ban 1H → Tái phạm → Ban vĩnh viễn
 ✅ Batch update (giảm API calls)
 ✅ Retry logic (tăng stability)
+✅ Chỉ SEPAY - Xóa nạp tay
 ✅ ⭐ HỖ TRỢ LƯU TỐI ĐA 10 COOKIE CÙNG LÚC ⭐
-✅ 🔥 ROW CACHE + BROADCAST CACHE - GIẢM 90% SHEET CALLS 🔥
 """
 
 import os
@@ -19,7 +17,6 @@ from datetime import datetime, timedelta, timezone
 from flask import Flask, request
 import urllib.parse
 import time
-from collections import deque  # ✅ Thêm deque cho PROCESSED_UPDATE_IDS
 
 # =========================================================
 # TIMEZONE VIETNAM (GMT+7)
@@ -60,16 +57,13 @@ SAVE_URL = "https://shopee.vn/api/v2/voucher_wallet/save_vouchers"
 # =========================================================
 # ⭐ MULTI-COOKIE CONFIG ⭐
 # =========================================================
-MAX_COOKIES_PER_REQUEST = 10
-COOKIE_SEPARATOR = "\n"
+MAX_COOKIES_PER_REQUEST = 10  # Tối đa 10 cookie
+COOKIE_SEPARATOR = "\n"  # Phân cách bằng dòng mới
 
 # =========================================================
 # TOPUP RULES (SEPAY)
 # =========================================================
 MIN_TOPUP_AMOUNT = 10000
-
-# ✅ TIỀN THƯỞNG USER MỚI (5100đ để balance không bao giờ về 0)
-NEW_USER_BONUS = 5100
 
 TOPUP_BONUS_RULES = [
     (100000, 0.20),
@@ -99,9 +93,9 @@ def build_sepay_qr(user_id, amount=None):
 # =========================================================
 # ANTI-SPAM CONFIG
 # =========================================================
-SPAM_THRESHOLD = 5   # 5 request spam
-SPAM_WINDOW = 20     # trong 20 giây
-BAN_DURATION_1H = 3600
+SPAM_THRESHOLD = 15      # 15 lỗi
+SPAM_WINDOW = 60         # trong 60 giây
+BAN_DURATION_1H = 3600   # 1 giờ
 
 # =========================================================
 # DEBUG FLAG
@@ -116,7 +110,7 @@ def dprint(*args):
 # GOOGLE SHEET CONNECT WITH RETRY
 # =========================================================
 SHEET_READY = False
-sh          = None
+sh          = None  # ✅ Spreadsheet object (for BroadcastState sheet)
 ws_money    = None
 ws_voucher  = None
 ws_log      = None
@@ -171,13 +165,13 @@ while retry_count < MAX_RETRIES and not connected:
 
     except Exception as e:
         retry_count += 1
-        wait_time = 2 ** retry_count
-
+        wait_time = 2 ** retry_count  # 2s, 4s, 8s
+        
         print("=" * 60)
         print(f"❌ Connection failed (attempt {retry_count}/{MAX_RETRIES})")
         print(f"❌ Error: {str(e)}")
         print(f"❌ Error type: {type(e).__name__}")
-
+        
         if retry_count < MAX_RETRIES:
             print(f"⏳ Retrying in {wait_time}s...")
             time.sleep(wait_time)
@@ -189,165 +183,24 @@ while retry_count < MAX_RETRIES and not connected:
             SHEET_READY = False
 
 # =========================================================
-# 🔥 PRELOAD USERS + ROW CACHE (chạy 1 lần khi khởi động)
-# =========================================================
-if SHEET_READY:
-    print("🔄 Preloading users + row numbers into cache...")
-    try:
-        all_users = ws_money.get_all_values()
-        preload_count = 0
-
-        for idx, row in enumerate(all_users[1:], start=2):  # start=2 vì header ở row 1
-            if len(row) >= 1 and row[0]:
-                try:
-                    user_id = int(row[0])
-
-                    # ✅ CACHE ROW NUMBER sẽ được khai báo sau
-                    # cache_user_row(user_id, idx)
-                    preload_count += 1
-                except Exception:
-                    continue
-
-        print(f"✅ Will preload {preload_count} users into cache")
-
-    except Exception as e:
-        print(f"⚠️ Preload failed (non-critical): {e}")
-
-# =========================================================
 # STATE (GLOBAL)
 # =========================================================
-PENDING_VOUCHER = {}
-PENDING_VOUCHER_TTL = 120  # 2 phút - expire nếu user không gửi cookie
+PENDING_VOUCHER = {}    # user_id -> cmd
+COMBO1_KEY = "combo1"
 
-# ✅ DYNAMIC COMBO DETECTION - Không hardcode, tự phát hiện từ Sheet
-# Combo nào có trong VoucherStock với Combo = "combo1", "combo2"... đều tự động hiện
-# COMBO1_KEY, COMBO2_KEY... sẽ được detect tự động
+# ✅ SPAM TRACKER (in-memory, sync to sheet on ban)
+SPAM_TRACKER = {}  # user_id -> {"errors": [timestamp], "ban_count": 0}
 
-# ✅ CALLBACK RATE LIMIT - Tránh spam click BUY
-CALLBACK_COOLDOWN = {}
-CALLBACK_COOLDOWN_SECONDS = 2  # 2 giây giữa các click
+# ✅ BROADCAST COOLDOWN (tránh spam broadcast)
+LAST_BROADCAST_TIME = None  # timestamp of last broadcast
+BROADCAST_COOLDOWN = 60  # seconds - chỉ cho phép broadcast mỗi 60s (tăng từ 30s)
 
-# ✅ SPAM TRACKER
-SPAM_TRACKER = {}
+# ✅ MESSAGE DEDUPLICATION (tránh xử lý cùng message nhiều lần)
+PROCESSED_MESSAGES = set()  # Lưu message_id đã xử lý
+MAX_PROCESSED_MESSAGES = 1000  # Giới hạn số message lưu trong memory
 
-# =========================================================
-# 🔥 ROW NUMBER CACHE - GIẢM 80% SHEET API CALLS
-# =========================================================
-USER_ROW_CACHE = {}
-USER_ROW_CACHE_TTL = 3600  # 1 giờ
-USER_ROW_CACHE_TIME = {}
-
-def cache_user_row(user_id, row_number):
-    """Cache row number của user"""
-    USER_ROW_CACHE[user_id] = row_number
-    USER_ROW_CACHE_TIME[user_id] = time.time()
-    dprint(f"✅ Cached row for user {user_id}: row {row_number}")
-
-def get_cached_user_row(user_id):
-    """Get row number từ cache. Returns: row_number hoặc None"""
-    if user_id not in USER_ROW_CACHE:
-        return None
-    cache_time = USER_ROW_CACHE_TIME.get(user_id, 0)
-    if time.time() - cache_time > USER_ROW_CACHE_TTL:
-        del USER_ROW_CACHE[user_id]
-        del USER_ROW_CACHE_TIME[user_id]
-        return None
-    return USER_ROW_CACHE[user_id]
-
-def invalidate_user_row_cache(user_id):
-    """Xóa row cache khi cần"""
-    if user_id in USER_ROW_CACHE:
-        del USER_ROW_CACHE[user_id]
-        del USER_ROW_CACHE_TIME[user_id]
-
-# =========================================================
-# 🔥 BROADCAST USER CACHE
-# =========================================================
-BROADCAST_USER_CACHE = None
-BROADCAST_USER_CACHE_TIME = 0
-BROADCAST_USER_CACHE_TTL = 300  # 5 phút
-
-# ✅ BROADCAST COOLDOWN
-LAST_BROADCAST_TIME = None
-BROADCAST_COOLDOWN = 60
-
-# ✅ MESSAGE DEDUPLICATION
-PROCESSED_MESSAGES = set()
-MAX_PROCESSED_MESSAGES = 1000
-
-# ✅ UPDATE_ID DEDUPLICATION - Tránh Telegram resend khi Sheet lag
-# Dùng deque thay vì set để xóa theo thứ tự FIFO
-PROCESSED_UPDATE_IDS = deque(maxlen=2000)  # Auto-drop oldest when full
-
-# ✅ BROADCAST LOCK
+# ✅ BROADCAST LOCK (đang broadcast thì không cho broadcast nữa)
 IS_BROADCASTING = False
-
-# =========================================================
-# 🔥 CHẠY PRELOAD THỰC SỰ (SAU KHI ĐỊNH NGHĨA CACHE FUNCTIONS)
-# =========================================================
-if SHEET_READY:
-    print("🔄 Actually preloading users into ROW_CACHE...")
-    try:
-        all_users = ws_money.get_all_values()
-        preload_count = 0
-
-        for idx, row in enumerate(all_users[1:], start=2):
-            if len(row) >= 1 and row[0]:
-                try:
-                    user_id = int(row[0])
-                    cache_user_row(user_id, idx)
-                    preload_count += 1
-                except Exception:
-                    continue
-
-        print(f"✅ Preloaded {preload_count} users into ROW_CACHE")
-        print(f"✅ Cache stats: {len(USER_ROW_CACHE)} row numbers cached")
-
-    except Exception as e:
-        print(f"⚠️ Preload failed (non-critical): {e}")
-
-# =========================================================
-# 🔥 VOUCHER STOCK CACHE - GIẢM 90% CALLS KHI MUA VOUCHER
-# =========================================================
-VOUCHER_STOCK_CACHE = {
-    "rows": None,
-    "ts": 0
-}
-VOUCHER_STOCK_TTL = 60  # 60 giây
-
-def get_voucher_stock_cached():
-    """
-    ✅ Cache voucher stock 60s để tránh đốt Sheet
-    Returns: list of dict
-    """
-    global VOUCHER_STOCK_CACHE
-    
-    now = time.time()
-    
-    # Check cache
-    if VOUCHER_STOCK_CACHE["rows"] and (now - VOUCHER_STOCK_CACHE["ts"] < VOUCHER_STOCK_TTL):
-        dprint("✅ VOUCHER_STOCK_CACHE HIT")
-        return VOUCHER_STOCK_CACHE["rows"]
-    
-    # Cache miss → gọi Sheet
-    dprint("⚠️ VOUCHER_STOCK_CACHE MISS, calling Sheet...")
-    
-    if not SHEET_READY:
-        return []
-    
-    try:
-        rows = ws_voucher.get_all_records()
-        VOUCHER_STOCK_CACHE["rows"] = rows
-        VOUCHER_STOCK_CACHE["ts"] = now
-        dprint(f"✅ Cached {len(rows)} vouchers")
-        return rows
-    except Exception as e:
-        dprint(f"❌ get_voucher_stock_cached error: {e}")
-        # Fallback: trả cache cũ nếu có
-        if VOUCHER_STOCK_CACHE["rows"]:
-            dprint("⚠️ Using stale cache")
-            return VOUCHER_STOCK_CACHE["rows"]
-        return []
 
 # =========================================================
 # TELEGRAM UTIL
@@ -399,7 +252,13 @@ def tg_answer_callback(callback_id, text=None, show_alert=False):
 # KEYBOARD
 # =========================================================
 def build_main_keyboard(is_active=True):
+    """
+    Build main keyboard based on user status
+    is_active: True = đã kích hoạt (ẩn nút kích hoạt)
+               False = chưa kích hoạt (hiện nút kích hoạt)
+    """
     if is_active:
+        # User đã kích hoạt - ẨN NÚT KÍCH HOẠT
         return {
             "keyboard": [
                 ["💎 Nạp tiền"],
@@ -409,6 +268,7 @@ def build_main_keyboard(is_active=True):
             "resize_keyboard": True
         }
     else:
+        # User chưa kích hoạt - HIỆN NÚT KÍCH HOẠT
         return {
             "keyboard": [
                 ["🎊 Kích Hoạt Tặng 5k", "💎 Nạp tiền"],
@@ -422,102 +282,82 @@ def build_main_keyboard(is_active=True):
 # UTIL
 # =========================================================
 def now_str():
+    """Return current time in Vietnam timezone"""
     return datetime.now(VIETNAM_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 def now_datetime():
+    """Return current datetime in Vietnam timezone"""
     return datetime.now(VIETNAM_TZ)
 
 def get_all_user_ids():
-    """
-    ✅ V4: Cache broadcast user list, ưu tiên dùng USER_ROW_CACHE
-    """
-    global BROADCAST_USER_CACHE, BROADCAST_USER_CACHE_TIME
-
+    """Lấy tất cả user_id từ sheet Thanh Toan"""
     if not SHEET_READY:
         return []
-
-    # ✅ CHECK CACHE TRƯỚC
-    now = time.time()
-    if (BROADCAST_USER_CACHE and
-        now - BROADCAST_USER_CACHE_TIME < BROADCAST_USER_CACHE_TTL):
-        dprint(f"✅ BROADCAST CACHE HIT: {len(BROADCAST_USER_CACHE)} users")
-        return BROADCAST_USER_CACHE
-
-    # ❌ Cache miss
-    dprint("⚠️ BROADCAST CACHE MISS...")
-
     try:
-        # ✅ ƯU TIÊN DÙNG USER_ROW_CACHE (không gọi Sheet)
-        cached_users = list(USER_ROW_CACHE.keys())
-        if len(cached_users) > 10:
-            dprint(f"✅ Using {len(cached_users)} users from ROW_CACHE")
-            BROADCAST_USER_CACHE = cached_users
-            BROADCAST_USER_CACHE_TIME = now
-            return cached_users
-
-        # ❌ Fallback: đọc từ Sheet
-        dprint("⚠️ Reading all users from Sheet...")
         all_values = ws_money.get_all_values()
-        user_ids = set()
-        for row in all_values[1:]:
-            if row and row[0]:
+        user_ids = set()  # ✅ Dùng set() tự động loại duplicate
+        for row in all_values[1:]:  # Skip header
+            if row and row[0]:  # Có user_id
                 try:
                     user_id = int(row[0])
-                    user_ids.add(user_id)
+                    user_ids.add(user_id)  # ✅ add() thay vì append()
                 except:
                     continue
-
-        result = list(user_ids)
-        BROADCAST_USER_CACHE = result
-        BROADCAST_USER_CACHE_TIME = now
-
-        dprint(f"📊 Loaded {len(result)} users from Sheet")
+        
+        result = list(user_ids)  # Convert về list
+        dprint(f"📊 Found {len(result)} unique users")  # ✅ Debug log
         return result
     except Exception as e:
         dprint("get_all_user_ids error:", e)
-        if BROADCAST_USER_CACHE:
-            dprint("⚠️ Using stale cache due to error")
-            return BROADCAST_USER_CACHE
         return []
 
 def broadcast_message(message, exclude_admin=False):
+    """Gửi thông báo đến tất cả user"""
     user_ids = get_all_user_ids()
-
+    
     if not user_ids:
         dprint("❌ No users found for broadcast")
         return 0, 0
-
+    
     dprint(f"📢 Starting broadcast to {len(user_ids)} users...")
-
+    
     success = 0
     failed = 0
-    sent_to = set()
-
+    sent_to = set()  # ✅ Track user đã gửi để tránh duplicate
+    
     for user_id in user_ids:
+        # ✅ Skip nếu đã gửi cho user này rồi
         if user_id in sent_to:
             dprint(f"⚠️ Skipping duplicate user_id: {user_id}")
             continue
-
+            
+        # Bỏ qua admin nếu cần
         if exclude_admin and user_id == ADMIN_ID:
             continue
-
+            
         try:
+            # Format thông báo đẹp
             broadcast_text = f"📢 <b>THÔNG BÁO TỪ BOT</b>\n\n{message}"
             tg_send(user_id, broadcast_text)
-            sent_to.add(user_id)
+            sent_to.add(user_id)  # ✅ Đánh dấu đã gửi
             success += 1
-            time.sleep(0.05)
+            # Tránh spam Telegram API
+            time.sleep(0.05)  # 50ms delay giữa mỗi tin nhắn
         except Exception as e:
             dprint(f"❌ Broadcast failed for {user_id}:", e)
             failed += 1
-
+    
     dprint(f"✅ Broadcast completed: {success} success, {failed} failed")
     return success, failed
 
+
+
+
 # =========================================================
-# SHEET-BASED STATE
+# SHEET-BASED STATE (for serverless)
 # =========================================================
 def get_broadcast_sheet():
+    """Get or create BroadcastState sheet"""
     if not SHEET_READY:
         return None
     try:
@@ -532,26 +372,31 @@ def get_broadcast_sheet():
         return None
 
 def get_last_broadcast_time_from_sheet():
+    """Lấy thời gian broadcast gần nhất từ sheet"""
     ws = get_broadcast_sheet()
     if not ws:
         return None
     try:
         all_values = ws.get_all_values()
-        if len(all_values) <= 1:
+        if len(all_values) <= 1:  # Chỉ có header
             return None
-
-        for row in reversed(all_values[1:]):
+        
+        # Tìm broadcast STARTED/COMPLETED gần nhất
+        for row in reversed(all_values[1:]):  # Skip header, đọc ngược
             if row[2] in ["STARTED", "COMPLETED"]:
                 timestamp_str = row[0]
+                # Parse: "2024-12-28 16:46:00"
                 dt = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+                # Convert to Vietnam timezone timestamp
                 return dt.replace(tzinfo=VIETNAM_TZ).timestamp()
-
+        
         return None
     except Exception as e:
         dprint(f"get_last_broadcast_time_from_sheet error: {e}")
         return None
 
 def set_broadcast_state_to_sheet(admin_id, status, message_id=""):
+    """Lưu broadcast state vào sheet"""
     ws = get_broadcast_sheet()
     if not ws:
         return False
@@ -567,8 +412,10 @@ def set_broadcast_state_to_sheet(admin_id, status, message_id=""):
     except Exception as e:
         dprint(f"set_broadcast_state_to_sheet error: {e}")
         return False
-
 def is_broadcast_message_processed(message_id):
+    """
+    Check message_id đã từng broadcast chưa (chống gửi lặp)
+    """
     if not message_id:
         return False
 
@@ -577,6 +424,7 @@ def is_broadcast_message_processed(message_id):
         return False
 
     try:
+        # Cột D = MessageID
         col_message_ids = ws.col_values(4)
         return str(message_id) in col_message_ids
     except Exception as e:
@@ -584,20 +432,22 @@ def is_broadcast_message_processed(message_id):
         return False
 
 def check_broadcast_cooldown_from_sheet():
+    """Check cooldown từ sheet"""
     last_time = get_last_broadcast_time_from_sheet()
     if not last_time:
-        return True, 0
-
+        return True, 0  # OK to broadcast
+    
     current_time = time.time()
     time_since_last = current_time - last_time
-
+    
     dprint(f"⏱️ Time since last broadcast: {time_since_last:.1f}s")
-
+    
     if time_since_last < BROADCAST_COOLDOWN:
         wait_time = int(BROADCAST_COOLDOWN - time_since_last)
         return False, wait_time
-
+    
     return True, 0
+
 
 def log_row(user_id, username, action, value="", note=""):
     if not SHEET_READY:
@@ -610,77 +460,82 @@ def log_row(user_id, username, action, value="", note=""):
 # =========================================================
 # ✅ ANTI-SPAM SYSTEM
 # =========================================================
-def track_error(user_id, username="", reason=""):
+def track_error(user_id, username=""):
     """
-    ✅ FIXED: CHỈ track spam thật sự
-    
-    Reason phải là:
-    - SPAM_CALLBACK: Click callback liên tục
-    - SPAM_COMMAND: Gửi command liên tục
-    - SPAM_TEXT: Gửi text trùng nhau
-    
-    KHÔNG track:
-    - Lỗi nghiệp vụ (không đủ tiền, voucher hết...)
-    - Cookie lỗi
-    - User click bình thường
+    Track lỗi của user, return True nếu cần ban
     """
-    # ✅ CHỈ track các loại spam thật
-    if reason not in ("SPAM_CALLBACK", "SPAM_COMMAND", "SPAM_TEXT"):
-        dprint(f"⚠️ track_error: Invalid reason '{reason}', skipping")
-        return False
-    
     now = time.time()
-
+    
     if user_id not in SPAM_TRACKER:
         SPAM_TRACKER[user_id] = {
             "errors": [],
             "ban_count": 0
         }
-
+    
     tracker = SPAM_TRACKER[user_id]
+    
+    # Thêm timestamp lỗi hiện tại
     tracker["errors"].append(now)
+    
+    # Xóa lỗi cũ hơn SPAM_WINDOW
     tracker["errors"] = [t for t in tracker["errors"] if now - t < SPAM_WINDOW]
-
+    
+    # Check threshold
     if len(tracker["errors"]) >= SPAM_THRESHOLD:
+        # Ban user
         ban_count = tracker["ban_count"]
         error_count = len(tracker["errors"])
-
+        
         if ban_count == 0:
+            # Lần đầu → Ban 1H
             apply_ban(user_id, "1H")
             notify_admin_spam(user_id, username, "1H", error_count)
             tracker["ban_count"] = 1
             return True
         else:
+            # Tái phạm → Ban vĩnh viễn
             apply_ban(user_id, "PERMANENT")
             notify_admin_spam(user_id, username, "PERMANENT", error_count)
             return True
-
+    
     return False
 
 def check_ban_status(user_id):
+    """
+    Đọc cột F (ghi Chú) để check ban
+    Return: {
+        "banned": True/False,
+        "type": "1H" / "PERMANENT",
+        "until": "2025-12-27 10:30" / "Vĩnh viễn"
+    }
+    """
     if not SHEET_READY:
         return {"banned": False}
-
+    
     row = get_user_row(user_id)
     if not row:
         return {"banned": False}
-
+    
     try:
-        note = ws_money.cell(row, 6).value or ""
-
+        note = ws_money.cell(row, 6).value or ""  # Cột F
+        
+        # Check BAN VĨNH VIỄN
         if "BAN VĨNH VIỄN" in note.upper():
             return {
                 "banned": True,
                 "type": "PERMANENT",
                 "until": "Vĩnh viễn"
             }
-
+        
+        # Check BAN 1H
         if "BAN 1H:" in note:
             try:
                 ban_until_str = note.split("BAN 1H:")[1].strip()
                 ban_until = datetime.strptime(ban_until_str, "%Y-%m-%d %H:%M")
+                # Make timezone-aware
                 ban_until = ban_until.replace(tzinfo=VIETNAM_TZ)
-
+                
+                # Check còn hiệu lực không
                 if now_datetime() < ban_until:
                     return {
                         "banned": True,
@@ -688,24 +543,30 @@ def check_ban_status(user_id):
                         "until": ban_until_str
                     }
                 else:
+                    # Hết hạn ban → xóa note
                     ws_money.update_cell(row, 6, "auto từ bot")
                     return {"banned": False}
             except:
                 pass
-
+        
         return {"banned": False}
-
+        
     except Exception as e:
         dprint("check_ban_status error:", e)
         return {"banned": False}
 
 def notify_admin_spam(user_id, username, ban_type, error_count):
+    """
+    Gửi cảnh báo spam cho admin
+    """
     if not ADMIN_ID or ADMIN_ID == 0:
         return
-
+    
     try:
+        # Lấy thông tin user
         row, balance, status = get_user_data(user_id)
-
+        
+        # Format ban info
         if ban_type == "PERMANENT":
             ban_text = "🔨 Hành động: Ban vĩnh viễn"
             time_text = "⏰ Thời gian: Vĩnh viễn"
@@ -713,12 +574,14 @@ def notify_admin_spam(user_id, username, ban_type, error_count):
             ban_until = now_datetime() + timedelta(seconds=BAN_DURATION_1H)
             ban_text = "🔨 Hành động: Ban 1 giờ"
             time_text = f"⏰ Hết hạn: {ban_until.strftime('%Y-%m-%d %H:%M')}"
-
+        
+        # Format username
         if username:
             user_info = f"@{username}"
         else:
             user_info = f"ID: {user_id}"
-
+        
+        # Build message
         msg = (
             "🚨 <b>CẢNH BÁO SPAM</b>\n\n"
             f"👤 User: {user_info}\n"
@@ -732,34 +595,37 @@ def notify_admin_spam(user_id, username, ban_type, error_count):
             f"• Status: {status}\n\n"
             f"🔗 <a href='tg://user?id={user_id}'>Link user</a>"
         )
-
+        
         tg_send(ADMIN_ID, msg)
         dprint(f"✅ Sent spam alert to admin: {user_id}")
-
+        
     except Exception as e:
         dprint("notify_admin_spam error:", e)
 
 def apply_ban(user_id, ban_type):
+    """
+    Ghi ban status vào cột F
+    ban_type: "1H" hoặc "PERMANENT"
+    """
     if not SHEET_READY:
         return
-
+    
     row = get_user_row(user_id)
     if not row:
         return
-
+    
     try:
         if ban_type == "PERMANENT":
             note = "BAN VĨNH VIỄN: Spam"
         else:
             ban_until = now_datetime() + timedelta(seconds=BAN_DURATION_1H)
             note = f"BAN 1H: {ban_until.strftime('%Y-%m-%d %H:%M')}"
-
+        
         ws_money.update_cell(row, 6, note)
-        invalidate_user_row_cache(user_id)  # ✅ INVALIDATE CACHE
         log_row(user_id, "", "BAN_APPLIED", ban_type, note)
-
+        
         dprint(f"✅ Applied ban: {user_id} → {ban_type}")
-
+        
     except Exception as e:
         dprint("apply_ban error:", e)
 
@@ -767,37 +633,15 @@ def apply_ban(user_id, ban_type):
 # USER / MONEY UTIL
 # =========================================================
 def get_user_row(user_id):
-    """
-    ✅ V4: Cache-first, giảm 80% Sheet API calls
-    """
     if not SHEET_READY:
         return None
-
-    # ✅ CHECK CACHE TRƯỚC
-    cached_row = get_cached_user_row(user_id)
-    if cached_row:
-        dprint(f"✅ ROW CACHE HIT: user {user_id} = row {cached_row}")
-        return cached_row
-
-    # ❌ Cache miss → gọi Sheet
-    dprint(f"⚠️ ROW CACHE MISS: user {user_id}, calling Sheet...")
     try:
         ids = ws_money.col_values(1)
-        row = ids.index(str(user_id)) + 1 if str(user_id) in ids else None
-
-        # ✅ CACHE NGAY
-        if row:
-            cache_user_row(user_id, row)
-
-        return row
+        return ids.index(str(user_id)) + 1 if str(user_id) in ids else None
     except Exception:
         return None
 
 def ensure_user_exists(user_id, username):
-    """
-    ✅ V4 FIXED: Append đúng 7 cột + cộng 5100đ cho user mới
-    Schema: Tele ID | Username | Balance | Trang Thái | Chi Chú | note | Gift Status
-    """
     if not SHEET_READY:
         return None
 
@@ -806,30 +650,13 @@ def ensure_user_exists(user_id, username):
         return row
 
     try:
-        # ✅ FIXED: Append 7 cột + cộng 5100đ
         ws_money.append_row([
-            str(user_id),      # A: Tele ID
-            username,          # B: Username
-            NEW_USER_BONUS,    # C: Balance (5100đ thưởng)
-            "active",          # D: Trang Thái
-            "auto from bot",   # E: Chi Chú
-            "",                # F: note (dùng cho ban/unban)
-            ""                 # G: Gift Status
+            str(user_id),
+            username,
+            0,
+            "active",
+            "auto từ bot"
         ])
-        dprint(f"✅ Created new user {user_id} with {NEW_USER_BONUS:,}đ bonus")
-
-        # ✅ Log thưởng user mới
-        log_row(user_id, username, "NEW_USER_BONUS", str(NEW_USER_BONUS), "Thưởng user mới")
-
-        # ✅ CACHE ROW NGAY
-        try:
-            all_rows = ws_money.get_all_values()
-            new_row = len(all_rows)
-            cache_user_row(user_id, new_row)
-            dprint(f"✅ Cached new row {new_row} for user {user_id}")
-        except:
-            pass
-
     except Exception as e:
         dprint("ensure_user_exists error:", e)
 
@@ -852,6 +679,7 @@ def get_user_data(user_id):
         return row, 0, ""
 
 def add_balance(user_id, amount):
+    """✅ Optimized with batch update"""
     if not SHEET_READY:
         return 0
 
@@ -862,23 +690,24 @@ def add_balance(user_id, amount):
     try:
         bal = int(ws_money.cell(row, 3).value or 0)
         new_bal = bal + int(amount)
-
+        
+        # ✅ Single API call
         ws_money.update_cell(row, 3, new_bal)
-
+        
         return new_bal
     except Exception as e:
         dprint("add_balance error:", e)
         return 0
 
 # =========================================================
-# TOPUP UNIQUE
+# TOPUP UNIQUE (ANTI DUPLICATE)
 # =========================================================
 def is_tx_exists(tx_id):
     if not SHEET_READY or ws_nap_tien is None:
         return False
 
     try:
-        tx_list = ws_nap_tien.col_values(6)
+        tx_list = ws_nap_tien.col_values(6)  # cột F = tx_id
         return str(tx_id) in tx_list
     except Exception as e:
         print("[TX_CHECK_ERROR]", e)
@@ -890,7 +719,7 @@ def save_topup_to_sheet(user_id, username, amount, loai, tx_id, note=""):
 
     try:
         ws_nap_tien.append_row([
-            now_str(),
+            now_str(),  # Vietnam time
             str(user_id),
             username or "",
             int(amount),
@@ -934,30 +763,43 @@ def topup_history_text(user_id, limit=10):
 # ⭐ MULTI-COOKIE PARSER ⭐
 # =========================================================
 def parse_cookies(text):
+    """
+    Parse multiple cookies từ text
+    Hỗ trợ:
+    - Phân cách bằng dòng mới (\n)
+    - Tự động trim whitespace
+    - Bỏ qua dòng trống
+    - Giới hạn MAX_COOKIES_PER_REQUEST
+    
+    Returns: list of cookies (max 10)
+    """
+    # Split by newlines
     lines = text.strip().split('\n')
-
+    
+    # Clean và filter
     cookies = []
     for line in lines:
         cookie = line.strip()
-        if cookie:
+        if cookie:  # Bỏ qua dòng trống
             cookies.append(cookie)
-
+    
+    # Giới hạn số lượng
     if len(cookies) > MAX_COOKIES_PER_REQUEST:
         cookies = cookies[:MAX_COOKIES_PER_REQUEST]
-
+    
     return cookies
 
 # =========================================================
 # VOUCHER UTIL
 # =========================================================
 def get_voucher(cmd):
-    """
-    ✅ FIXED: Dùng cache thay vì get_all_records() mỗi lần
-    """
     if not SHEET_READY:
         return None, "Hệ thống Sheet đang lỗi"
 
-    rows = get_voucher_stock_cached()
+    try:
+        rows = ws_voucher.get_all_records()
+    except Exception:
+        return None, "Không đọc được VoucherStock"
 
     for r in rows:
         name = str(r.get("Tên Mã", "")).replace(" ", "").lower()
@@ -1014,35 +856,44 @@ def save_voucher_and_check(cookie, voucher):
 # ⭐ MULTI-COOKIE VOUCHER SAVER ⭐
 # =========================================================
 def save_voucher_multi_cookies(cookies, voucher):
+    """
+    Lưu voucher cho nhiều cookie
+    
+    Returns:
+        success_count: số cookie lưu thành công
+        total_count: tổng số cookie
+        failed_details: [(cookie_index, reason)]
+    """
     success_count = 0
     failed_details = []
-
+    
     for idx, cookie in enumerate(cookies, 1):
         ok, reason = save_voucher_and_check(cookie, voucher)
-
+        
         if ok:
             success_count += 1
             dprint(f"✅ Cookie #{idx}: SUCCESS")
         else:
             failed_details.append((idx, reason))
             dprint(f"❌ Cookie #{idx}: {reason}")
-
+        
+        # Delay nhẹ giữa các request
         if idx < len(cookies):
             time.sleep(0.1)
-
+    
     return success_count, len(cookies), failed_details
 
 # =========================================================
 # COMBO UTIL
 # =========================================================
 def get_vouchers_by_combo(combo_key):
-    """
-    ✅ FIXED: Dùng cache thay vì get_all_records() mỗi lần
-    """
     if not SHEET_READY:
         return [], "Hệ thống Sheet đang lỗi"
 
-    rows = get_voucher_stock_cached()
+    try:
+        rows = ws_voucher.get_all_records()
+    except Exception:
+        return [], "Không đọc được VoucherStock"
 
     items = []
     for r in rows:
@@ -1057,6 +908,7 @@ def get_vouchers_by_combo(combo_key):
     return items, None
 
 def process_combo1(cookie):
+    """Process COMBO1 với 1 cookie"""
     vouchers, err = get_vouchers_by_combo(COMBO1_KEY)
     if err:
         return False, err, 0, 0, []
@@ -1083,25 +935,32 @@ def process_combo1(cookie):
 
     return True, total_price, len(saved), len(vouchers), failed
 
-def process_combo_multi_cookies(cookies, combo_key):
+def process_combo1_multi_cookies(cookies):
     """
-    ✅ DYNAMIC COMBO PROCESSING
-    Xử lý bất kỳ combo nào: combo1, combo2, combo3...
+    Process COMBO1 với nhiều cookie
+    
+    Returns:
+        success: True/False
+        total_price: tổng giá phải trả
+        cookies_saved: số cookie lưu thành công
+        total_cookies: tổng số cookie
+        vouchers_per_cookie: số voucher mỗi cookie
+        failed_details: [(cookie_idx, voucher_name, reason)]
     """
-    vouchers, err = get_vouchers_by_combo(combo_key)
+    vouchers, err = get_vouchers_by_combo(COMBO1_KEY)
     if err:
         return False, err, 0, len(cookies), 0, []
-
+    
     price_per_cookie = sum(int(v.get("Giá", 0)) for v in vouchers)
     cookies_saved = 0
     failed_details = []
-
+    
     for cookie_idx, cookie in enumerate(cookies, 1):
         cookie_success = True
-
+        
         for voucher in vouchers:
             ok, reason = save_voucher_and_check(cookie, voucher)
-
+            
             if not ok:
                 cookie_success = False
                 failed_details.append((
@@ -1112,35 +971,41 @@ def process_combo_multi_cookies(cookies, combo_key):
                 dprint(f"❌ Cookie #{cookie_idx} - {voucher.get('Tên Mã')}: {reason}")
             else:
                 dprint(f"✅ Cookie #{cookie_idx} - {voucher.get('Tên Mã')}: OK")
-
+            
+            # Delay giữa các voucher
             time.sleep(0.1)
-
+        
         if cookie_success:
             cookies_saved += 1
-
+        
+        # Delay giữa các cookie
         if cookie_idx < len(cookies):
             time.sleep(0.2)
-
+    
     if cookies_saved == 0:
         return False, "Không lưu được cookie nào", 0, len(cookies), len(vouchers), failed_details
-
+    
     total_price = cookies_saved * price_per_cookie
-
+    
     return True, total_price, cookies_saved, len(cookies), len(vouchers), failed_details
+
 
 # =========================================================
 # ⭐ DYNAMIC VOUCHER KEYBOARD FROM SHEET ⭐
 # =========================================================
+
+# Cache để giảm API calls
 VOUCHER_KEYBOARD_CACHE = {
     "keyboard": None,
     "info_text": None,
     "last_update": 0
 }
-KEYBOARD_CACHE_DURATION = 60
+KEYBOARD_CACHE_DURATION = 60  # 60 giây
 
 def apply_strikethrough(text):
+    """Apply strikethrough Unicode characters"""
     strikethrough_map = {
-        'A': 'A̶', 'B': 'B̶', 'C': 'C̶', 'D': 'D̶', 'E': 'E̶', 'F': 'F̶', 'G': 'G̶', 'H': 'H̶',
+        'A': 'A̶', 'B': 'B̶', 'C': 'C̶', 'D': 'D̶', 'E': 'E̶', 'F': 'F̶', 'G': 'G̶', 'H': 'H̶', 
         'I': 'I̶', 'J': 'J̶', 'K': 'K̶', 'L': 'L̶', 'M': 'M̶', 'N': 'N̶', 'O': 'O̶', 'P': 'P̶',
         'Q': 'Q̶', 'R': 'R̶', 'S': 'S̶', 'T': 'T̶', 'U': 'U̶', 'V': 'V̶', 'W': 'W̶', 'X': 'X̶',
         'Y': 'Y̶', 'Z': 'Z̶',
@@ -1150,7 +1015,13 @@ def apply_strikethrough(text):
         'y': 'y̶', 'z': 'z̶',
         '0': '0̶', '1': '1̶', '2': '2̶', '3': '3̶', '4': '4̶', '5': '5̶', '6': '6̶', '7': '7̶',
         '8': '8̶', '9': '9̶',
-        '%': '%̶', '+': '+̶', '/': '/̶', ' ': ' ̶',
+        '%': '%̶', '+': '+̶', '/': '/̶', ' ': ' ̶', 'đ': 'đ̶', 'á': 'á̶', 'à': 'à̶', 'ả': 'ả̶',
+        'ã': 'ã̶', 'ạ': 'ạ̶', 'â': 'â̶', 'ê': 'ê̶', 'í': 'í̶', 'ì': 'ì̶', 'ỉ': 'ỉ̶', 'ĩ': 'ĩ̶',
+        'ị': 'ị̶', 'ó': 'ó̶', 'ò': 'ò̶', 'ỏ': 'ỏ̶', 'õ': 'õ̶', 'ọ': 'ọ̶', 'ô': 'ô̶', 'ơ': 'ơ̶',
+        'ú': 'ú̶', 'ù': 'ù̶', 'ủ': 'ủ̶', 'ũ': 'ũ̶', 'ụ': 'ụ̶', 'ư': 'ư̶', 'ý': 'ý̶', 'ỳ': 'ỳ̶',
+        'ỷ': 'ỷ̶', 'ỹ': 'ỹ̶', 'ỵ': 'ỵ̶', 'ế': 'ế̶', 'ề': 'ề̶', 'ể': 'ể̶', 'ễ': 'ễ̶', 'ệ': 'ệ̶',
+        'ố': 'ố̶', 'ồ': 'ồ̶', 'ổ': 'ổ̶', 'ỗ': 'ỗ̶', 'ộ': 'ộ̶', 'ớ': 'ớ̶', 'ờ': 'ờ̶', 'ở': 'ở̶',
+        'ỡ': 'ỡ̶', 'ợ': 'ợ̶', 'ứ': 'ứ̶', 'ừ': 'ừ̶', 'ử': 'ử̶', 'ữ': 'ữ̶', 'ự': 'ự̶',
     }
     result = ""
     for char in text:
@@ -1159,184 +1030,207 @@ def apply_strikethrough(text):
 
 def parse_position(pos_str):
     """
-    ✅ FIXED: Parse đúng 100%
-    1A → (1, 'A')
-    A1 → (1, 'A')
-    2B → (2, 'B')
-    B2 → (2, 'B')
+    Parse position string: 1A, 1B, 2A, B1, C2, etc.
+    Hỗ trợ cả 2 format:
+    - Số + Chữ: 1A, 2B, 10C... → (row_num, col_letter)
+    - Chữ + Số: A1, B2, C3... → (col_letter_as_row, number_as_col)
+    
+    Returns: (row_num, col_letter) or None
     """
     if not pos_str or not isinstance(pos_str, str):
         return None
-
+    
     pos_str = pos_str.strip().upper()
-
-    # Kiểu 1A, 2B (số trước, chữ sau)
-    m = re.match(r'^(\d+)([A-Z])$', pos_str)
-    if m:
-        return (int(m.group(1)), m.group(2))
-
-    # Kiểu A1, B2 (chữ trước, số sau)
-    m = re.match(r'^([A-Z])(\d+)$', pos_str)
-    if m:
-        return (int(m.group(2)), m.group(1))
-
+    
+    import re
+    
+    # Format 1: Số + Chữ (1A, 2B, 10C...)
+    match = re.match(r'^(\d+)([A-Z])$', pos_str)
+    if match:
+        row_num = int(match.group(1))
+        col_letter = match.group(2)
+        return (row_num, col_letter)
+    
+    # Format 2: Chữ + Số (A1, B2, C3...)
+    # Convert: A1 → (1, A), B1 → (2, A), C1 → (3, A)
+    match = re.match(r'^([A-Z])(\d+)$', pos_str)
+    if match:
+        letter = match.group(1)
+        number = int(match.group(2))
+        
+        # Map letter to row: A=1, B=2, C=3...
+        row_num = ord(letter) - ord('A') + 1
+        
+        # Map number to column: 1=A, 2=B, 3=C...
+        col_letter = chr(ord('A') + number - 1)
+        
+        return (row_num, col_letter)
+    
     return None
 
 def build_voucher_keyboard_from_sheet():
+    """
+    Build keyboard dynamically from VoucherStock sheet
+    Returns: (keyboard_dict, info_text)
+    """
     if not SHEET_READY:
         dprint("❌ Sheet not ready, using static keyboard")
         return build_static_voucher_keyboard()
-
+    
     try:
         dprint("📊 Reading VoucherStock sheet...")
         all_rows = ws_voucher.get_all_records()
         dprint(f"📊 Found {len(all_rows)} rows in VoucherStock")
-
-        vouchers_by_position = {}
         
-        # ✅ DYNAMIC COMBO DETECTION
-        combos_data = {}  # {combo_key: {price, count, vouchers}}
+        vouchers_by_position = {}
+        has_combo = False
+        combo_price = 0
+        combo_count = 0
         
         info_lines = ["🎊 <b>VOUCHER HIỆN CÓ - HAPPY NEW YEAR 2025!</b> 🎊\n━━━━━━━━━━━━━━━"]
-
+        
         for idx, row in enumerate(all_rows, 1):
+            dprint(f"Row {idx}: {row.get('Tên Mã', 'N/A')}")
+            
+            # Debug: Show all available column names
+            if idx == 1:
+                dprint(f"  📋 Available columns: {list(row.keys())}")
+            
+            # ✅ CHECK "Display" COLUMN - Try multiple variations
             display = ""
-            for key in ["Display", "Show", "Visible", "Hiển thị", "Hiển Thị"]:
+            for key in ["Display", "Show", "Visible", "Hiển thị", "Hiển Thị", "Hien thi", "Hien Thi"]:
                 if key in row:
                     display = str(row[key]).strip().upper()
                     if display:
+                        dprint(f"  Found display column: '{key}' = '{display}'")
                         break
-
+            
+            dprint(f"  Display value: '{display}'")
+            
+            # Accept: YES, Y, TRUE, 1
             if display not in ["YES", "Y", "TRUE", "1"]:
+                dprint(f"  ⚠️ Skipped (Display != Yes)")
                 continue
-
+            
             pos_str = str(row.get("Vị trí", "")).strip()
             if not pos_str:
+                pos_str = str(row.get("Vị Trí", "")).strip()
+            if not pos_str:
                 pos_str = str(row.get("Position", "")).strip()
-
-            # ✅ Detect tất cả combo (combo1, combo2, combo3...)
+            dprint(f"  Position: '{pos_str}'")
+            
             combo = str(row.get("Combo", "")).strip().lower()
-            if combo.startswith("combo"):
-                if combo not in combos_data:
-                    combos_data[combo] = {
-                        "price": 0,
-                        "count": 0,
-                        "vouchers": []
-                    }
+            if combo == "combo1":
+                has_combo = True
                 try:
-                    combos_data[combo]["price"] += int(row.get("Giá", 0))
-                    combos_data[combo]["count"] += 1
-                    combos_data[combo]["vouchers"].append(row)
+                    combo_price += int(row.get("Giá", 0))
+                    combo_count += 1
                 except:
                     pass
-
+            
             if not pos_str:
+                dprint(f"  ⚠️ Skipped (no position)")
                 continue
-
+            
             position = parse_position(pos_str)
             if not position:
+                dprint(f"  ⚠️ Invalid position format: {pos_str}")
                 continue
-
+            
+            dprint(f"  ✅ Added at position {position}")
             vouchers_by_position[position] = row
-
+        
+        dprint(f"📊 Total vouchers with valid position: {len(vouchers_by_position)}")
+        
         if len(vouchers_by_position) == 0:
+            dprint("❌ No vouchers found, using static keyboard")
             return build_static_voucher_keyboard()
-
+        
         keyboard_rows = []
         current_row_num = None
         current_row_buttons = []
-
+        
         sorted_positions = sorted(vouchers_by_position.keys())
-
+        dprint(f"📊 Sorted positions: {sorted_positions}")
+        
         for position in sorted_positions:
             row_num, col_letter = position
             voucher = vouchers_by_position[position]
-
+            
             if current_row_num != row_num:
                 if current_row_buttons:
                     keyboard_rows.append(current_row_buttons)
+                    dprint(f"Added row {current_row_num}: {len(current_row_buttons)} buttons")
                 current_row_buttons = []
                 current_row_num = row_num
-
-            # ✅ Hỗ trợ nhiều tên cột display name
-            ten_hien_thi = ""
-            for key in ["Display Name", "Tên hiển thị", "Tên Hiển Thị", "display_name"]:
-                if key in voucher:
-                    ten_hien_thi = str(voucher[key]).strip()
-                    if ten_hien_thi:
-                        break
             
-            # Fallback nếu không có display name
+            ten_hien_thi = str(voucher.get("Tên hiển thị", "")).strip()
+            if not ten_hien_thi:
+                ten_hien_thi = str(voucher.get("Tên Hiển Thị", "")).strip()
+            if not ten_hien_thi:
+                ten_hien_thi = str(voucher.get("Display Name", "")).strip()
+            if not ten_hien_thi:
+                ten_hien_thi = str(voucher.get("DisplayName", "")).strip()
             if not ten_hien_thi:
                 ten_hien_thi = str(voucher.get("Tên Mã", "")).strip()
-
+            
+            dprint(f"    Display Name: '{ten_hien_thi}'")
+            
             trang_thai = str(voucher.get("Trạng Thái", "")).strip()
+            if not trang_thai:
+                trang_thai = str(voucher.get("Trạng thái", "")).strip()
+            
             ten_ma = str(voucher.get("Tên Mã", "")).strip()
+            if not ten_ma:
+                ten_ma = str(voucher.get("Tên mã", "")).strip()
+            
             gia = int(voucher.get("Giá", 0))
-
+            
             is_sold_out = trang_thai != "Còn Mã"
-
+            
             if is_sold_out:
-                # ✅ Giảm độ dài text - bỏ emoji, chỉ giữ "Hết"
-                button_text = f"{ten_hien_thi} (Hết)"
+                button_text = f"⚫ {apply_strikethrough(ten_hien_thi)} (Hết)"
                 callback_data = f"SOLD_OUT:{ten_ma}"
             else:
-                # ✅ Giảm emoji, text ngắn hơn cho mobile
-                button_text = f"🎊 {ten_hien_thi}"
+                # ✨ Thêm emoji năm mới ngẫu nhiên
+                new_year_emojis = ["🎊", "🎉", "✨", "🎁", "🔥", "⭐", "💫"]
+                import random
+                emoji = random.choice(new_year_emojis)
+                button_text = f"{emoji} {ten_hien_thi}"
                 callback_data = f"BUY:{ten_ma}"
-
+            
             current_row_buttons.append({
                 "text": button_text,
                 "callback_data": callback_data
             })
-
+            
             if not is_sold_out:
                 info_lines.append(f"• {ten_hien_thi} — 💰Giá {gia:,} VNĐ")
-
+        
         if current_row_buttons:
             keyboard_rows.append(current_row_buttons)
-
-        # ✅ DYNAMIC COMBO BUTTONS - Tự động thêm tất cả combo từ Sheet
-        if combos_data:
+            dprint(f"Added last row {current_row_num}: {len(current_row_buttons)} buttons")
+        
+        if has_combo:
+            keyboard_rows.append([{
+                "text": "🎆 COMBO1 | Mã 100k + Ship HT 🎆",
+                "callback_data": "BUY:combo1"
+            }])
             info_lines.append(f"\n🟣 <b>COMBO ĐẶC BIỆT</b>")
-            
-            # Sort combo theo tên (combo1, combo2, combo3...)
-            for combo_key in sorted(combos_data.keys()):
-                combo_info = combos_data[combo_key]
-                
-                # ✅ Tên hiển thị NGẮN hơn cho mobile
-                combo_display_names = {
-                    "combo1": "🎆 COMBO1 | 100k+Ship",
-                    "combo2": "🎆 COMBO2 | Giảm Giá",
-                    "combo3": "🎆 COMBO3 | Freeship",
-                }
-                
-                # Fallback: COMBO{N} nếu không có trong map
-                combo_num = combo_key.replace("combo", "")
-                display_name = combo_display_names.get(
-                    combo_key,
-                    f"🎆 COMBO{combo_num.upper()}"
-                )
-                
-                # Thêm nút
-                keyboard_rows.append([{
-                    "text": display_name,
-                    "callback_data": f"BUY:{combo_key}"
-                }])
-                
-                # Thông tin combo
-                info_lines.append(f"• {combo_key.upper()}: {combo_info['count']} mã")
-                info_lines.append(f"  💰 {combo_info['price']:,} VNĐ")
-
+            info_lines.append(f"• COMBO1: 100k/0đ + Freeship Hỏa Tốc")
+            info_lines.append(f"  💰 {combo_price:,} VNĐ | 🎫 {combo_count} mã")
+        
         info_lines.append("\n⭐ <b>HỖ TRỢ LƯU TỐI ĐA 10 COOKIE</b>")
         info_lines.append("💡 Gửi mỗi cookie 1 dòng")
         info_lines.append("\n👇 <b>BẤM NÚT BÊN DƯỚI ĐỂ MUA</b>")
-
+        
         keyboard = {"inline_keyboard": keyboard_rows}
         info_text = "\n".join(info_lines)
-
+        
+        dprint(f"✅ Built keyboard with {len(keyboard_rows)} rows")
+        
         return keyboard, info_text
-
+        
     except Exception as e:
         dprint(f"❌ Error building keyboard from sheet: {e}")
         import traceback
@@ -1344,6 +1238,7 @@ def build_voucher_keyboard_from_sheet():
         return build_static_voucher_keyboard()
 
 def build_static_voucher_keyboard():
+    """Fallback static keyboard"""
     keyboard = {
         "inline_keyboard": [
             [
@@ -1358,7 +1253,7 @@ def build_static_voucher_keyboard():
             ]
         ]
     }
-
+    
     info_text = (
         "🎊 <b>VOUCHER HIỆN CÓ - HAPPY NEW YEAR 2025!</b> 🎊\n"
         "━━━━━━━━━━━━━━━\n"
@@ -1373,33 +1268,36 @@ def build_static_voucher_keyboard():
         "💡 Gửi mỗi cookie 1 dòng\n\n"
         "👇 <b>BẤM NÚT BÊN DƯỚI ĐỂ MUA</b>"
     )
-
+    
     return keyboard, info_text
 
 def get_voucher_keyboard_cached():
+    """Get voucher keyboard with cache (60s)"""
     global VOUCHER_KEYBOARD_CACHE
-
+    
     now = time.time()
-
-    if (VOUCHER_KEYBOARD_CACHE["keyboard"] and
+    
+    if (VOUCHER_KEYBOARD_CACHE["keyboard"] and 
         now - VOUCHER_KEYBOARD_CACHE["last_update"] < KEYBOARD_CACHE_DURATION):
         dprint("Using cached keyboard")
         return VOUCHER_KEYBOARD_CACHE["keyboard"], VOUCHER_KEYBOARD_CACHE["info_text"]
-
+    
     dprint("Rebuilding keyboard from sheet...")
     keyboard, info_text = build_voucher_keyboard_from_sheet()
-
+    
     VOUCHER_KEYBOARD_CACHE["keyboard"] = keyboard
     VOUCHER_KEYBOARD_CACHE["info_text"] = info_text
     VOUCHER_KEYBOARD_CACHE["last_update"] = now
-
+    
     return keyboard, info_text
 
 def build_voucher_info_text():
+    """Get info text (with cache)"""
     _, info_text = get_voucher_keyboard_cached()
     return info_text
 
 def build_quick_voucher_keyboard():
+    """Get keyboard (with cache)"""
     keyboard, _ = get_voucher_keyboard_cached()
     return keyboard
 
@@ -1427,141 +1325,94 @@ def handle_active_gift_5k(user_id, username):
         return False, "❌ Hệ thống đang lỗi."
 
     row = get_user_row(user_id)
+
     if not row:
         row = ensure_user_exists(user_id, username)
 
     data = ws_money.row_values(row)
     status = data[3] if len(data) > 3 else ""
 
-    if status == "active":
-        return False, "⚠️ Tài khoản đã kích hoạt, không thể nhận khuyến mãi."
+    if status in ("active", "trial_used"):
+        return False, "⚠️ ACC đã kích hoạt và nhận khuyến mãi rồi."
 
+    # ✅ Batch update: status + balance cùng lúc
     try:
         current_balance = int(data[2]) if len(data) > 2 else 0
         new_balance = current_balance + 5000
-
-        ws_money.update(
-            f'C{row}:D{row}',
-            [[new_balance, "active"]]
-        )
-
-        log_row(
-            user_id,
-            username,
-            "ACTIVE_GIFT_5K",
-            "5000",
-            "Kích hoạt + nhận KM lần đầu"
-        )
-
+        
+        # Single API call
+        ws_money.update(f'C{row}:D{row}', [[new_balance, "active"]])
+        
+        log_row(user_id, username, "ACTIVE_GIFT_5K", "5000", "Kích hoạt + tặng 5k")
+        
         return True, new_balance
-
     except Exception as e:
         dprint("handle_active_gift_5k error:", e)
-        return False, "❌ Lỗi khi kích hoạt"
+        return False, "❌ Lỗi khi cập nhật"
 
 # =========================================================
 # CALLBACK QUERY HANDLER
 # =========================================================
-def handle_callback_query(cb):
-    cb_id = cb.get("id")
-    data = cb.get("data", "")
-    from_user = cb.get("from", {})
-    user_id = from_user.get("id")
-
-    if data.startswith("SOLD_OUT:"):
-        tg_answer_callback(cb_id, "⚠️ Voucher này tạm hết mã. Vui lòng quay lại sau!", True)
-        return
-
-    if data.startswith("BUY:"):
-        cmd = data.split(":", 1)[1]
-
-        # ✅ RATE LIMIT - Ngăn spam click BUY
-        last_callback_time = CALLBACK_COOLDOWN.get(user_id, 0)
-        if time.time() - last_callback_time < CALLBACK_COOLDOWN_SECONDS:
-            tg_answer_callback(cb_id, "⏳ Chậm lại 1 chút", True)
-            dprint(f"⏳ Callback rate-limited: user {user_id}")
-            return
-        
-        CALLBACK_COOLDOWN[user_id] = time.time()
-
-        row, balance, status = get_user_data(user_id)
-        if not row:
-            tg_answer_callback(cb_id, "❌ Bạn chưa có ID", True)
-            return
-
-        if status != "active":
-            tg_answer_callback(cb_id, "❌ Tài khoản chưa được kích hoạt", True)
-            return
-
-        if user_id in PENDING_VOUCHER:
-            old_pending = PENDING_VOUCHER[user_id]
-            old_cmd = old_pending["cmd"] if isinstance(old_pending, dict) else old_pending
-            dprint(f"Cleared old pending: {old_cmd}")
-
-        # ✅ Lưu với timestamp
-        PENDING_VOUCHER[user_id] = {
-            "cmd": cmd,
-            "ts": time.time()
-        }
-
-        tg_answer_callback(cb_id)
-        tg_send(
-            user_id,
-            f"👉 Gửi <b>cookie</b> vào đây để lưu <b>{cmd}</b>\n\n"
-            f"⭐ <b>Hỗ trợ lưu tối đa 10 cookie</b>\n"
-            f"💡 Gửi mỗi cookie 1 dòng"
-        )
-        return
-
-    tg_answer_callback(cb_id, "⚠️ Thao tác không hỗ trợ", True)
 
 # =========================================================
 # TỔNG KẾT KINH DOANH
 # =========================================================
+
+# =========================================================
+# TỔNG KẾT KINH DOANH - ĐÚNG THEO CẤU TRÚC SHEET
+# =========================================================
+
 def parse_date_from_sheet(date_str):
+    """Parse date từ sheet (format: 2025-12-31 14:30:45)"""
     try:
         if isinstance(date_str, datetime):
             return date_str
+        # Format: "2025-12-31 14:30:45"
         return datetime.strptime(str(date_str).strip(), "%Y-%m-%d %H:%M:%S")
     except Exception:
         try:
+            # Backup: "31/12/2025 14:30:45"
             return datetime.strptime(str(date_str).strip(), "%d/%m/%Y %H:%M:%S")
         except Exception:
             return None
 
 def get_today_stats():
+    """Lấy thống kê chi tiết từng loại voucher"""
     if not SHEET_READY:
         return None
-
+    
     today = datetime.now(VIETNAM_TZ).date()
     stats = {
         "napten_count": 0,
         "napten_amount": 0,
         "napten_bonus": 0,
         "napten_users": set(),
-        "voucher_details": {},
+        "voucher_details": {},  # {"voucher100k": 15, "combo1": 8}
         "total_usage": 0,
         "active_users": set(),
     }
-
+    
+    # ===== ĐỌC NAP TIEN =====
     try:
         if ws_nap_tien:
             all_rows = ws_nap_tien.get_all_values()
-            for row in all_rows[1:]:
+            for row in all_rows[1:]:  # Skip header
                 if len(row) < 7:
                     continue
                 try:
+                    # Cột A = time
                     row_date = parse_date_from_sheet(row[0])
                     if row_date and row_date.date() == today:
-                        user_id = int(row[1])
-                        amount = int(row[3]) if row[3] else 0
-                        note = row[6]
-
+                        user_id = int(row[1])  # Cột B = Tele ID
+                        amount = int(row[3]) if row[3] else 0  # Cột D = số tiền
+                        note = row[6]  # Cột G = nội dung (+10%=7500)
+                        
                         stats["napten_count"] += 1
                         stats["napten_amount"] += amount
                         stats["napten_users"].add(user_id)
                         stats["active_users"].add(user_id)
-
+                        
+                        # Parse bonus từ note (+10%=7500)
                         if note and "=" in note:
                             try:
                                 stats["napten_bonus"] += int(note.split("=")[1])
@@ -1571,29 +1422,34 @@ def get_today_stats():
                     continue
     except Exception as e:
         dprint(f"Error reading Nap Tien: {e}")
-
+    
+    # ===== ĐỌC LOGS - ĐẾM TỪNG LOẠI VOUCHER =====
     try:
         if ws_log:
             all_logs = ws_log.get_all_values()
-            for row in all_logs[1:]:
+            for row in all_logs[1:]:  # Skip header
                 if len(row) < 6:
                     continue
                 try:
+                    # Cột A = time
                     row_date = parse_date_from_sheet(row[0])
                     if row_date and row_date.date() == today:
-                        user_id = int(row[1])
-                        action = row[3]
-                        details = row[5]
-
+                        user_id = int(row[1])  # Cột B = Tele ID
+                        action = row[3]  # Cột D = voucher/COMBO1/AUTO_ACTIVE
+                        details = row[5]  # Cột F = voucher100k hoặc balance_sau
+                        
                         stats["active_users"].add(user_id)
-
+                        
+                        # ĐẾM VOUCHER ĐƠN
                         if action == "VOUCHER":
+                            # Cột F = tên voucher (voucher100k, voucher50max200, voucherHoaToc)
                             voucher_name = details
                             if voucher_name not in stats["voucher_details"]:
                                 stats["voucher_details"][voucher_name] = 0
                             stats["voucher_details"][voucher_name] += 1
                             stats["total_usage"] += 1
-
+                        
+                        # ĐẾM COMBO1
                         elif action == "COMBO1":
                             if "COMBO1" not in stats["voucher_details"]:
                                 stats["voucher_details"]["COMBO1"] = 0
@@ -1603,11 +1459,14 @@ def get_today_stats():
                     continue
     except Exception as e:
         dprint(f"Error reading Logs: {e}")
-
+    
+    # Convert set to count
     stats["napten_users"] = len(stats["napten_users"])
     stats["active_users"] = len(stats["active_users"])
-
+    
     return stats
+
+import re
 
 def format_tongket_message(stats):
     if not stats:
@@ -1630,21 +1489,28 @@ def format_tongket_message(stats):
 ━━━━━━━━━━━━━━━━━━
 🎟️ <b>VOUCHER ĐÃ LƯU</b>"""
 
+    # ================== GỘP LƯỢT LƯU THEO MÃ GỐC ==================
+
     grouped = {}
 
     for raw_key, count in stats["voucher_details"].items():
         raw = raw_key.lower()
 
+        # COMBO
         if "combo1" in raw:
             base = "COMBO1"
+
+        # voucherHoaToc / voucherHoaToc1 / voucherHoaToc2
         elif "hoatoc" in raw:
             base = "voucherHoaToc"
+
         else:
+            # BẮT voucher + số (voucher100k, voucher30k, voucher50max100...)
             m = re.search(r"(voucher[a-z0-9]+)", raw)
             if m:
                 base = m.group(1)
             else:
-                base = raw_key
+                base = raw_key  # fallback (hiếm)
 
         grouped.setdefault(base, 0)
         grouped[base] += count
@@ -1666,6 +1532,7 @@ def format_tongket_message(stats):
 
     msg += f"\n\n<b>━ Tổng: {total} lượt lưu</b>"
 
+    # ================== USER ==================
     msg += f"""
 
 ━━━━━━━━━━━━━━━━━━
@@ -1675,86 +1542,93 @@ def format_tongket_message(stats):
 
     return msg
 
+
+
+
 def handle_tongket_command(chat_id, user_id):
+    """Xử lý lệnh /tongket"""
     if user_id != ADMIN_ID:
         tg_send(chat_id, "⛔ Chỉ admin")
         return
-
+    
     tg_send(chat_id, "⏳ Đang tổng hợp dữ liệu...")
     stats = get_today_stats()
-
+    
     if not stats:
         tg_send(chat_id, "❌ Lỗi khi đọc dữ liệu")
         return
-
+    
     msg = format_tongket_message(stats)
     tg_send(chat_id, msg)
 
-# =========================================================
-# 🔥 STATS COMMAND - XEM CACHE STATISTICS
-# =========================================================
-def handle_stats_command(chat_id, user_id):
-    """Admin command: xem cache stats"""
-    if user_id != ADMIN_ID:
-        tg_send(chat_id, "⛔ Chỉ admin")
+def handle_callback_query(cb):
+    cb_id = cb.get("id")
+    data = cb.get("data", "")
+    from_user = cb.get("from", {})
+    user_id = from_user.get("id")
+
+    # SOLD_OUT:voucher100k
+    if data.startswith("SOLD_OUT:"):
+        tg_answer_callback(cb_id, "⚠️ Voucher này tạm hết mã. Vui lòng quay lại sau!", True)
         return
 
-    stats = f"""📊 <b>CACHE STATISTICS</b>
+    # BUY:voucher100k | BUY:combo1
+    if data.startswith("BUY:"):
+        cmd = data.split(":", 1)[1]
 
-🔢 <b>Row Cache:</b>
-• Cached users: {len(USER_ROW_CACHE)}
-• TTL: {USER_ROW_CACHE_TTL}s (1h)
-• Memory: ~{len(USER_ROW_CACHE) * 8} bytes
+        row, balance, status = get_user_data(user_id)
+        if not row:
+            tg_answer_callback(cb_id, "❌ Bạn chưa có ID", True)
+            return
 
-📢 <b>Broadcast Cache:</b>
-• Cached: {"Yes" if BROADCAST_USER_CACHE else "No"}
-• Count: {len(BROADCAST_USER_CACHE) if BROADCAST_USER_CACHE else 0}
-• Age: {int(time.time() - BROADCAST_USER_CACHE_TIME)}s
+        if status != "active":
+            tg_answer_callback(cb_id, "❌ Tài khoản chưa được kích hoạt", True)
+            return
 
-💬 <b>Message Dedup:</b>
-• Tracked: {len(PROCESSED_MESSAGES)}
+        # ✅ Xóa lệnh cũ nếu có
+        if user_id in PENDING_VOUCHER:
+            old_cmd = PENDING_VOUCHER[user_id]
+            dprint(f"Cleared old pending: {old_cmd}")
 
-━━━━━━━━━━━━━━━━━━
-<b>✅ Cache hit → Không gọi Sheet</b>
-<b>❌ Cache miss → Gọi Sheet (hiếm)</b>
+        PENDING_VOUCHER[user_id] = cmd
 
-<b>Hiệu quả:</b> Giảm ~90% API calls!
-"""
-    tg_send(chat_id, stats)
+        tg_answer_callback(cb_id)
+        tg_send(
+            user_id,
+            f"👉 Gửi <b>cookie</b> vào đây để lưu <b>{cmd}</b>\n\n"
+            f"⭐ <b>Hỗ trợ lưu tối đa 10 cookie</b>\n"
+            f"💡 Gửi mỗi cookie 1 dòng"
+        )
+        return
+
+    tg_answer_callback(cb_id, "⚠️ Thao tác không hỗ trợ", True)
 
 # =========================================================
 # CORE UPDATE HANDLER
 # =========================================================
 def handle_update(update):
     dprint("UPDATE:", update)
-
-    # ✅ UPDATE_ID DEDUPLICATION - Tránh Telegram resend khi lag
-    update_id = update.get("update_id")
     
-    if update_id:
-        if update_id in PROCESSED_UPDATE_IDS:
-            dprint(f"⚠️ DUPLICATE UPDATE_ID DETECTED: {update_id} - SKIPPING")
-            return
-        
-        # ✅ deque tự động drop oldest khi đầy (maxlen=2000)
-        PROCESSED_UPDATE_IDS.append(update_id)
-
-    # ✅ MESSAGE DEDUPLICATION
+    # ✅ MESSAGE DEDUPLICATION - Tránh xử lý cùng message nhiều lần
     global PROCESSED_MESSAGES
     msg = update.get("message", {})
     message_id = msg.get("message_id")
-
+    
     if message_id:
+        # Tạo unique key: chat_id + message_id
         chat_id = msg.get("chat", {}).get("id")
         msg_key = f"{chat_id}_{message_id}"
-
+        
         if msg_key in PROCESSED_MESSAGES:
             dprint(f"⚠️ DUPLICATE MESSAGE DETECTED: {msg_key} - SKIPPING")
-            return
-
+            return  # ✅ BỎ QUA message duplicate
+        
+        # Thêm vào set
         PROCESSED_MESSAGES.add(msg_key)
-
+        
+        # Giới hạn memory: nếu quá 1000 messages, xóa cũ
         if len(PROCESSED_MESSAGES) > MAX_PROCESSED_MESSAGES:
+            # Convert to list, xóa 100 message cũ nhất
             old_msgs = list(PROCESSED_MESSAGES)[:100]
             for old_msg in old_msgs:
                 PROCESSED_MESSAGES.discard(old_msg)
@@ -1776,21 +1650,21 @@ def handle_update(update):
     msg = update.get("message") or update.get("callback_query", {}).get("message", {})
     from_user = msg.get("from") or update.get("callback_query", {}).get("from", {})
     user_id = from_user.get("id")
-
+    
     if not user_id:
         return
-
+    
     ban_status = check_ban_status(user_id)
-
+    
     if ban_status["banned"]:
         ban_type = ban_status["type"]
         ban_until = ban_status["until"]
-
+        
         msg_text = (
             "⛔ <b>TÀI KHOẢN BỊ KHÓA</b>\n\n"
             "🚫 <b>Lý do:</b> Spam hệ thống\n"
         )
-
+        
         if ban_type == "PERMANENT":
             msg_text += "⏰ <b>Thời gian:</b> Vĩnh viễn\n\n"
         else:
@@ -1798,14 +1672,14 @@ def handle_update(update):
                 f"⏰ <b>Thời gian:</b> 1 giờ\n"
                 f"⏱️ <b>Hết hạn:</b> {ban_until}\n\n"
             )
-
+        
         msg_text += "📞 <b>Liên hệ:</b> @BonBonxHPx"
-
+        
         chat_id = msg.get("chat", {}).get("id")
         if chat_id:
             tg_send(chat_id, msg_text)
-
-        return
+        
+        return  # ✅ CHẶN HOÀN TOÀN
 
     # ===== CALLBACK QUERY =====
     if "callback_query" in update:
@@ -1826,49 +1700,52 @@ def handle_update(update):
     if text == "/tongket":
         handle_tongket_command(chat_id, user_id)
         return
-
-    # /stats - XEM CACHE STATS
-    if text == "/stats":
-        handle_stats_command(chat_id, user_id)
-        return
-
-    # /update
+    
+    # /update - Force reload keyboard + show menu (Admin only)
     if text == "/update":
         if user_id != ADMIN_ID:
             tg_send(chat_id, "⛔ Chỉ admin")
             return
-
+        
         global VOUCHER_KEYBOARD_CACHE
         VOUCHER_KEYBOARD_CACHE = {
             "keyboard": None,
             "info_text": None,
             "last_update": 0
         }
-
+        
+        # Rebuild keyboard cache
         voucher_keyboard, voucher_info = get_voucher_keyboard_cached()
-
+        
+        # Send success message with main menu
         tg_send(
-            chat_id,
-            "✅ Đã cập nhật Bản mới nhất!\n\n",
-
+            chat_id, 
+            "✅ Đã cập nhật keyboard từ Sheet!\n\n"
+            "🎊 <b>Menu đã được refresh</b>",
             build_main_keyboard(is_active=True)
         )
-
+        
+        # Show voucher keyboard luôn
         tg_send(chat_id, voucher_info, voucher_keyboard)
         return
-
+    
+    # ✅ Skip messages không có text (ảnh, sticker, voice...)
+    # Chỉ xử lý các message quan trọng không cần text
     if not text:
+        # Cho phép qua nếu đang chờ cookie (user có thể gửi nhầm ảnh)
         if user_id not in PENDING_VOUCHER:
             return
-
     # ===== ADMIN: /thongbao =====
     if text and text.startswith("/thongbao"):
+        # 🔒 Chỉ admin mới được dùng
         if user_id != ADMIN_ID:
             tg_send(chat_id, "⛔ Lệnh này chỉ dành cho Admin")
             return
 
+        # ✅ Lấy message_id (dùng để chống gửi lặp)
         message_id = msg.get("message_id", 0)
 
+        # ✅ Tách nội dung
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
             tg_send(
@@ -1881,6 +1758,8 @@ def handle_update(update):
             )
             return
 
+        # ❌ CHẶN NẾU MESSAGE_ID ĐÃ TỪNG BROADCAST
+        # (chỉ check khi cú pháp hợp lệ)
         if is_broadcast_message_processed(message_id):
             tg_send(
                 chat_id,
@@ -1890,6 +1769,7 @@ def handle_update(update):
             dprint(f"⚠️ DUPLICATE BROADCAST BLOCKED: msg_id={message_id}")
             return
 
+        # ✅ CHECK COOLDOWN từ sheet (serverless-safe)
         can_broadcast, wait_time = check_broadcast_cooldown_from_sheet()
         if not can_broadcast:
             tg_send(
@@ -1902,7 +1782,7 @@ def handle_update(update):
             return
 
         message = parts[1].strip()
-
+        # 🔒 BROADCAST LOCK (chặn chạy song song)
         global IS_BROADCASTING
         if IS_BROADCASTING:
             tg_send(
@@ -1914,13 +1794,15 @@ def handle_update(update):
 
         IS_BROADCASTING = True
 
+        # ✅ LƯU STATE STARTED (để chống retry / resend)
         if not set_broadcast_state_to_sheet(user_id, "STARTED", message_id):
-            IS_BROADCASTING = False
+            IS_BROADCASTING = False 
             tg_send(chat_id, "❌ Lỗi khi lưu trạng thái broadcast, vui lòng thử lại")
             return
 
         dprint(f"📝 Broadcast STARTED | admin={user_id} | msg_id={message_id}")
 
+        # ✅ PHẢN HỒI NGAY
         tg_send(
             chat_id,
             "✅ <b>ĐÃ NHẬN LỆNH BROADCAST</b>\n\n"
@@ -1929,11 +1811,14 @@ def handle_update(update):
         )
 
         try:
+            # 🚀 THỰC HIỆN BROADCAST
             dprint(f"🔔 Broadcasting: {message[:40]}...")
             success, failed = broadcast_message(message, exclude_admin=False)
 
+            # Log
             log_row(user_id, username, "BROADCAST", str(success), message[:50])
 
+            # ✅ LƯU STATE COMPLETED
             set_broadcast_state_to_sheet(user_id, "COMPLETED", message_id)
 
             tg_send(
@@ -1949,31 +1834,17 @@ def handle_update(update):
             tg_send(chat_id, f"❌ Lỗi khi broadcast: {str(e)}")
 
         finally:
+            # 🔓 MỞ KHÓA BROADCAST
             IS_BROADCASTING = False
+
+
 
     # ===== /start =====
     if text == "/start":
-        # ✅ Check user mới
-        is_new_user = get_user_row(user_id) is None
-        
         row = ensure_user_exists(user_id, username)
         row, balance, status = get_user_data(user_id)
 
-        # ✅ Message cho user mới (đã tự động active trong ensure_user_exists)
-        if is_new_user:
-            tg_send(
-                chat_id,
-                f"🎉 <b>CHÀO MỪNG BẠN MỚI!</b>\n\n"
-                f"👋 Xin chào <b>{username or 'bạn'}</b>\n\n"
-                f"🎁 Bạn nhận được <b>{NEW_USER_BONUS:,}đ</b> thưởng!\n"
-                f"💼 Số dư: <b>{balance:,}đ</b>\n"
-                f"📊 Trạng thái: <b>{status}</b>\n\n"
-                f"🛒 Bấm nút bên dưới để bắt đầu mua voucher",
-                build_main_keyboard(is_active=True)
-            )
-            return
-
-        # ✅ User cũ - active
+        # ❌ ĐÃ ACTIVE → KHÔNG PHÁT TIỀN
         if status == "active":
             tg_send(
                 chat_id,
@@ -1982,19 +1853,73 @@ def handle_update(update):
             )
             return
 
-        # ⚠️ User cũ - KHÔNG active
-        # → KHÔNG tự động active (cần admin hoặc nạp tiền)
-        tg_send(
-            chat_id,
-            "⚠️ <b>Tài khoản chưa được kích hoạt</b>\n\n"
-            f"💼 Số dư: <b>{balance:,}đ</b>\n"
-            f"📊 Trạng thái: <b>{status}</b>\n\n"
-            "📞 Liên hệ admin: @BonBonxHPx",
-            build_main_keyboard(is_active=False)
-        )
+        # ✅ CHƯA ACTIVE → CHỈ SET ACTIVE, KHÔNG CỘNG TIỀN
+        try:
+            ws_money.update_cell(row, 4, "active")
+
+            log_row(
+                user_id,
+                username,
+                "AUTO_ACTIVE",
+                "",
+                "Active tài khoản (không KM)"
+            )
+
+            tg_send(
+                chat_id,
+                f"🎉 <b>KÍCH HOẠT THÀNH CÔNG</b>\n\n"
+                f"🆔 ID: <code>{user_id}</code>\n"
+                f"💡 Tài khoản đã được kích hoạt\n\n"
+                f"👉 <b>Bấm nút bên dưới để sử dụng</b>",
+                build_main_keyboard(is_active=True)
+            )
+        except Exception as e:
+            dprint("/start error:", e)
+
         return
 
-    # ===== NẠP TIỀN =====
+
+    def handle_active_gift_5k(user_id, username):
+        if not SHEET_READY:
+            return False, "❌ Hệ thống đang lỗi."
+
+        row = get_user_row(user_id)
+        if not row:
+            row = ensure_user_exists(user_id, username)
+
+        data = ws_money.row_values(row)
+        status = data[3] if len(data) > 3 else ""
+
+        # ❌ ĐÃ ACTIVE → CẤM NHẬN TIỀN
+        if status == "active":
+            return False, "⚠️ Tài khoản đã kích hoạt, không thể nhận khuyến mãi."
+
+        try:
+            current_balance = int(data[2]) if len(data) > 2 else 0
+            new_balance = current_balance + 5000
+
+            # ✅ SET ACTIVE + CỘNG TIỀN (1 LẦN DUY NHẤT)
+            ws_money.update(
+                f'C{row}:D{row}',
+                [[new_balance, "active"]]
+            )
+
+            log_row(
+                user_id,
+                username,
+                "ACTIVE_GIFT_5K",
+                "5000",
+                "Kích hoạt + nhận KM lần đầu"
+            )
+
+            return True, new_balance
+
+        except Exception as e:
+            dprint("handle_active_gift_5k error:", e)
+            return False, "❌ Lỗi khi kích hoạt"
+
+
+    # ===== NẠP TIỀN (CHỈ SEPAY) =====
     if text in ("💎 Nạp tiền", "💳 Nạp tiền"):
         ensure_user_exists(user_id, username)
 
@@ -2055,91 +1980,82 @@ def handle_update(update):
         or user_id in PENDING_VOUCHER
     ):
         tg_send(chat_id, "❌ Tài khoản chưa được kích hoạt.")
-        # ✅ KHÔNG track_error - user thật có thể chưa active
+        # ✅ Track lỗi
+        if track_error(user_id):
+            tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
         return
 
     # ===== ĐANG CHỜ COOKIE =====
     if user_id in PENDING_VOUCHER and not text.startswith("/"):
-        pending_data = PENDING_VOUCHER.pop(user_id)
+        cmd = PENDING_VOUCHER.pop(user_id)
         
-        # ✅ Check nếu là dict (có timestamp) hay string cũ
-        if isinstance(pending_data, dict):
-            cmd = pending_data["cmd"]
-            pending_ts = pending_data["ts"]
-            
-            # ✅ Check expired (quá 120s)
-            if time.time() - pending_ts > PENDING_VOUCHER_TTL:
-                tg_send(
-                    chat_id,
-                    "⏱️ <b>Phiên mua đã hết hạn</b>\n\n"
-                    "Vui lòng chọn voucher lại:",
-                    build_quick_voucher_keyboard()
-                )
-                dprint(f"⏱️ PENDING expired for user {user_id} (>{PENDING_VOUCHER_TTL}s)")
-                return
-        else:
-            # Fallback cho format cũ (string)
-            cmd = pending_data
-
+        # ⭐ PARSE MULTIPLE COOKIES
         cookies = parse_cookies(text)
-
+        
         if not cookies:
             tg_send(chat_id, "❌ Không tìm thấy cookie hợp lệ")
             return
-
+        
         num_cookies = len(cookies)
         dprint(f"📊 Received {num_cookies} cookies")
 
-        # ----- DYNAMIC COMBO -----
-        if cmd.startswith("combo"):
-            ok, total_price, cookies_saved, total_cookies, vouchers_per_cookie, failed = process_combo_multi_cookies(cookies, cmd)
+        # ----- COMBO1 -----
+        if cmd == COMBO1_KEY:
+            ok, total_price, cookies_saved, total_cookies, vouchers_per_cookie, failed = process_combo1_multi_cookies(cookies)
 
             if not ok:
-                tg_send(chat_id, f"❌ <b>{cmd.upper()} THẤT BẠI</b>\n{total_price}")
-                # ✅ KHÔNG track_error - đây là lỗi nghiệp vụ, không phải spam
+                tg_send(chat_id, f"❌ <b>COMBO1 THẤT BẠI</b>\n{total_price}")
+                if track_error(user_id):
+                    tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
                 return
 
             if balance < total_price:
                 tg_send(chat_id, f"❌ Không đủ số dư\n💰 Cần: {total_price:,}đ")
-                # ✅ KHÔNG track_error - đây là lỗi nghiệp vụ, không phải spam
+                if track_error(user_id):
+                    tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
                 return
 
             new_bal = balance - total_price
             ws_money.update_cell(row, 3, new_bal)
 
-            log_row(user_id, username, cmd.upper(), str(total_price), f"Lưu {cmd.upper()} {cookies_saved}/{total_cookies} thành công")
+            log_row(user_id, username, "COMBO1", str(total_price), f"Lưu COMBO1 {cookies_saved}/{total_cookies} thành công")
 
             if cookies_saved == total_cookies:
-                msg_text = f"✅ Lưu {cmd.upper()} <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
+                msg_text = f"✅ Lưu COMBO1 <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
             else:
-                msg_text = f"⚠️ Lưu {cmd.upper()} <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
+                msg_text = f"⚠️ Lưu COMBO1 <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
 
             tg_send(chat_id, msg_text)
-            tg_send(chat_id, "👉 <b>Bấm để lưu tiếp nhanh</b>", build_quick_buy_keyboard(cmd))
+            tg_send(chat_id, "👉 <b>Bấm để lưu tiếp nhanh</b>", build_quick_buy_keyboard("combo1"))
             return
 
         # ----- VOUCHER ĐƠN -----
         v, err = get_voucher(cmd)
         if err:
             tg_send(chat_id, f"❌ {err}")
-            # ✅ KHÔNG track_error - voucher hết/lỗi là lỗi nghiệp vụ
+            if track_error(user_id):
+                tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
             return
 
         price = int(v.get("Giá", 0))
         total_price = price * num_cookies
-
+        
         if balance < total_price:
             tg_send(chat_id, f"❌ Không đủ số dư\n💰 Cần: {total_price:,}đ ({price:,}đ × {num_cookies})")
-            # ✅ KHÔNG track_error - không đủ tiền là lỗi nghiệp vụ
+            if track_error(user_id):
+                tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
             return
 
+        # ⭐ SAVE TO MULTI COOKIES
         success_count, total_count, failed_details = save_voucher_multi_cookies(cookies, v)
-
+        
         if success_count == 0:
             tg_send(chat_id, "❌ Không lưu được cookie nào\n💸 Không trừ tiền")
-            # ✅ KHÔNG track_error - cookie lỗi/Shopee lỗi là lỗi nghiệp vụ
+            if track_error(user_id):
+                tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
             return
 
+        # Calculate actual price
         actual_price = price * success_count
         new_bal = balance - actual_price
         ws_money.update_cell(row, 3, new_bal)
@@ -2155,80 +2071,66 @@ def handle_update(update):
         tg_send(chat_id, "👉 <b>Bấm để lưu tiếp nhanh</b>", build_quick_buy_keyboard(cmd))
         return
 
-    # ===== FALLBACK: Cookie không có pending (Vercel cold start) =====
-    if not text.startswith("/") and "SPC_" in text:
-        # User gửi cookie nhưng bot không nhớ đang mua gì
-        tg_send(
-            chat_id,
-            "⚠️ <b>Phiên mua đã hết hạn</b>\n\n"
-            "Vui lòng bấm chọn voucher lại:",
-            build_quick_voucher_keyboard()
-        )
-        dprint(f"⚠️ PENDING_VOUCHER lost for user {user_id} (cold start?)")
-        return
-
-    # ===== LỆNH /combo1 /combo2 /combo3 <cookie> =====
+    # ===== LỆNH /voucherxxx <cookie> =====
+    # Skip nếu không có text (ví dụ: user gửi ảnh, sticker...)
     if not text:
         return
-
+    
     parts = text.split(maxsplit=1)
     if not parts:
         return
-
+    
     cmd = parts[0].replace("/", "")
     cookie_text = parts[1] if len(parts) > 1 else ""
 
-    # ----- DYNAMIC COMBO -----
-    if cmd.startswith("combo"):
+    # ----- COMBO1 -----
+    if cmd == COMBO1_KEY:
         if not cookie_text:
+            # ✅ Xóa lệnh cũ
             if user_id in PENDING_VOUCHER:
-                old_pending = PENDING_VOUCHER[user_id]
-                old_cmd = old_pending["cmd"] if isinstance(old_pending, dict) else old_pending
-                dprint(f"Cleared old pending: {old_cmd}")
-
-            # ✅ Lưu với timestamp
-            PENDING_VOUCHER[user_id] = {
-                "cmd": cmd,
-                "ts": time.time()
-            }
+                dprint(f"Cleared old pending: {PENDING_VOUCHER[user_id]}")
             
+            PENDING_VOUCHER[user_id] = COMBO1_KEY
             tg_send(
                 chat_id,
-                f"👉 Gửi <b>cookie</b> để lưu {cmd}\n\n"
+                "👉 Gửi <b>cookie</b> để lưu combo1\n\n"
                 "⭐ <b>Hỗ trợ lưu tối đa 10 cookie</b>\n"
                 "💡 Gửi mỗi cookie 1 dòng"
             )
             return
 
+        # ⭐ PARSE MULTIPLE COOKIES
         cookies = parse_cookies(cookie_text)
-
+        
         if not cookies:
             tg_send(chat_id, "❌ Không tìm thấy cookie hợp lệ")
             return
-
+        
         num_cookies = len(cookies)
 
-        ok, total_price, cookies_saved, total_cookies, vouchers_per_cookie, failed = process_combo_multi_cookies(cookies, cmd)
+        ok, total_price, cookies_saved, total_cookies, vouchers_per_cookie, failed = process_combo1_multi_cookies(cookies)
 
         if not ok:
-            tg_send(chat_id, f"❌ {cmd.upper()} THẤT BẠI\n{total_price}")
-            # ✅ KHÔNG track_error - lỗi nghiệp vụ
+            tg_send(chat_id, f"❌ COMBO1 THẤT BẠI\n{total_price}")
+            if track_error(user_id):
+                tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
             return
 
         if balance < total_price:
             tg_send(chat_id, f"❌ Không đủ số dư\n💰 Cần: {total_price:,}đ")
-            # ✅ KHÔNG track_error - lỗi nghiệp vụ
+            if track_error(user_id):
+                tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
             return
 
         new_bal = balance - total_price
         ws_money.update_cell(row, 3, new_bal)
 
-        log_row(user_id, username, cmd.upper(), str(total_price), f"Lưu {cmd.upper()} {cookies_saved}/{total_cookies} thành công")
+        log_row(user_id, username, "COMBO1", str(total_price), f"Lưu COMBO1 {cookies_saved}/{total_cookies} thành công")
 
         if cookies_saved == total_cookies:
-            msg_text = f"✅ Lưu {cmd.upper()} <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
+            msg_text = f"✅ Lưu COMBO1 <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
         else:
-            msg_text = f"⚠️ Lưu {cmd.upper()} <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
+            msg_text = f"⚠️ Lưu COMBO1 <b>{cookies_saved}/{total_cookies}</b> thành công | -{total_price:,}đ | Còn: <b>{new_bal:,}đ</b>"
 
         tg_send(chat_id, msg_text, build_main_keyboard(is_active=True))
         return
@@ -2236,17 +2138,11 @@ def handle_update(update):
     # ----- VOUCHER ĐƠN -----
     if cmd.startswith("voucher"):
         if not cookie_text:
+            # ✅ Xóa lệnh cũ
             if user_id in PENDING_VOUCHER:
-                old_pending = PENDING_VOUCHER[user_id]
-                old_cmd = old_pending["cmd"] if isinstance(old_pending, dict) else old_pending
-                dprint(f"Cleared old pending: {old_cmd}")
-
-            # ✅ Lưu với timestamp
-            PENDING_VOUCHER[user_id] = {
-                "cmd": cmd,
-                "ts": time.time()
-            }
+                dprint(f"Cleared old pending: {PENDING_VOUCHER[user_id]}")
             
+            PENDING_VOUCHER[user_id] = cmd
             tg_send(
                 chat_id,
                 f"👉 Gửi <b>cookie</b> để lưu {cmd}\n\n"
@@ -2255,33 +2151,38 @@ def handle_update(update):
             )
             return
 
+        # ⭐ PARSE MULTIPLE COOKIES
         cookies = parse_cookies(cookie_text)
-
+        
         if not cookies:
             tg_send(chat_id, "❌ Không tìm thấy cookie hợp lệ")
             return
-
+        
         num_cookies = len(cookies)
 
         v, err = get_voucher(cmd)
         if err:
             tg_send(chat_id, f"❌ {err}")
-            # ✅ KHÔNG track_error - lỗi nghiệp vụ
+            if track_error(user_id):
+                tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
             return
 
         price = int(v.get("Giá", 0))
         total_price = price * num_cookies
-
+        
         if balance < total_price:
             tg_send(chat_id, f"❌ Không đủ số dư\n💰 Cần: {total_price:,}đ")
-            # ✅ KHÔNG track_error - lỗi nghiệp vụ
+            if track_error(user_id):
+                tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
             return
 
+        # ⭐ SAVE TO MULTI COOKIES
         success_count, total_count, failed_details = save_voucher_multi_cookies(cookies, v)
-
+        
         if success_count == 0:
             tg_send(chat_id, "❌ Không lưu được cookie nào\n💸 Không trừ tiền")
-            # ✅ KHÔNG track_error - lỗi nghiệp vụ
+            if track_error(user_id):
+                tg_send(chat_id, "⛔ Tài khoản bị khóa do spam. Liên hệ @BonBonxHPx")
             return
 
         actual_price = price * success_count
@@ -2410,20 +2311,18 @@ def webhook():
 def home():
     if not SHEET_READY:
         return "Bot running, Sheet ERROR", 500
-    return "Bot is running - V4 OPTIMIZED (90% Less API Calls)", 200
+    return "Bot is running", 200
 
 # =========================================================
 # LOCAL RUNNER
 # =========================================================
 if __name__ == "__main__":
     print("=" * 60)
-    print(" NgânMiu.Store Telegram Bot")
-    print(" V4 - OPTIMIZED SHEET API CALLS (GIẢM 90%)")
+    print(" NgânMiu.Store Telegram Bot - MULTI-COOKIE VERSION")
     print("=" * 60)
     print("ADMIN_ID:", ADMIN_ID)
     print("SHEET_READY:", SHEET_READY)
     print("MAX_COOKIES_PER_REQUEST:", MAX_COOKIES_PER_REQUEST)
-    print("CACHE ENABLED: ROW_CACHE + BROADCAST_CACHE")
     print("=" * 60)
 
     app.run(host="127.0.0.1", port=5000, debug=False)
