@@ -2228,26 +2228,21 @@ def handle_update(update):
             )
             return
 
-        # ✅ User cũ - active
-        if status == "active":
-            tg_send(
-                chat_id,
-                "👋 <b>Chào mừng quay lại!</b>",
-                build_main_keyboard(is_active=True)
-            )
-            return
+        # ✅ User cũ - Auto fix status nếu chưa active
+        if status != "active":
+            try:
+                ws_money.update_cell(row, 4, "active")
+                dprint(f"✅ Auto fixed status for user {user_id}: {status} → active")
+                status = "active"
+            except Exception as e:
+                dprint(f"❌ Failed to update status: {e}")
 
-        # ⚠️ User cũ - KHÔNG active
+        # ✅ User cũ - Luôn hiển thị "Chào mừng quay lại"
         tg_send(
             chat_id,
-            "⚠️ <b>Tài khoản chưa được kích hoạt</b>\n\n"
-            f"💼 Số dư: <b>{balance:,}đ</b>\n"
-            f"📊 Trạng thái: <b>{status}</b>\n\n"
-            f"🎁 <b>NHẬN NGAY {ACTIVE_GIFT_AMOUNT:,}đ KHI KÍCH HOẠT!</b>\n\n"
-            f"👇 <b>Bấm nút bên dưới để kích hoạt:</b>\n"
-            f"   🎊 <b>Kích Hoạt Tặng 5k</b>\n\n"
-            f"📞 Hoặc liên hệ admin: @BonBonxHPx",
-            build_main_keyboard(is_active=False)
+            f"👋 <b>Chào mừng quay lại!</b>\n\n"
+            f"💼 Số dư: <b>{balance:,}đ</b>",
+            build_main_keyboard(is_active=True)
         )
         return
 
