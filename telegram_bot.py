@@ -423,24 +423,17 @@ def tg_edit_message(chat_id, message_id, text, reply_markup=None):
 # KEYBOARD
 # =========================================================
 def build_main_keyboard(is_active=True):
-    if is_active:
-        return {
-            "keyboard": [
-                ["💎 Nạp tiền"],
-                ["💰 Số dư", "🎁 Lưu Voucher"],
-                ["🧩 Hệ Thống Bot NgânMiu"]
-            ],
-            "resize_keyboard": True
-        }
-    else:
-        return {
-            "keyboard": [
-                ["🎊 Kích Hoạt Tặng 5k", "💎 Nạp tiền"],
-                ["💰 Số dư", "🎁 Lưu Voucher"],
-                ["🧩 Hệ Thống Bot NgânMiu"]
-            ],
-            "resize_keyboard": True
-        }
+    """
+    Keyboard chính - User mới luôn active ngay nên chỉ cần 1 keyboard
+    """
+    return {
+        "keyboard": [
+            ["💎 Nạp tiền"],
+            ["💰 Số dư", "🎁 Lưu Voucher"],
+            ["🧩 Hệ Thống Bot NgânMiu"]
+        ],
+        "resize_keyboard": True
+    }
 
 # =========================================================
 # UTIL
@@ -819,10 +812,9 @@ def get_user_row(user_id):
 
 def ensure_user_exists(user_id, username):
     """
-    ✅ V5: Tạo user MỚI với status = "new", balance = 0
-    User PHẢI BẤM NÚT "🎊 Kích Hoạt Tặng 5k" để nhận tiền
+    ✅ Tạo user MỚI: Auto active + 5100đ ngay
     
-    → DUY NHẤT 1 LUỒNG KÍCH HOẠT (dễ quản lý)
+    User KHÔNG cần bấm nút, nhận tiền ngay lập tức
     
     Schema: Tele ID | Username | Balance | Trang Thái | Chi Chú | note | Gift Status
     """
@@ -834,20 +826,20 @@ def ensure_user_exists(user_id, username):
         return row
 
     try:
-        # ✅ Tạo user mới: balance = 0, status = "new"
+        # ✅ Tạo user mới: balance = 5100, status = "active" (AUTO)
         ws_money.append_row([
             str(user_id),      # A: Tele ID
             username,          # B: Username
-            0,                 # C: Balance (0đ - chưa nhận thưởng)
-            "new",             # D: Trang Thái (new - chưa kích hoạt)
+            NEW_USER_BONUS,    # C: Balance (5100đ - AUTO)
+            "active",          # D: Trang Thái (active - AUTO)
             "auto from bot",   # E: Chi Chú
             "",                # F: note (dùng cho ban/unban)
             ""                 # G: Gift Status
         ])
-        dprint(f"✅ Created new user {user_id} with status=new (chưa kích hoạt)")
+        dprint(f"✅ Created new user {user_id} with {NEW_USER_BONUS:,}đ bonus (AUTO)")
 
-        # ✅ Log tạo user (KHÔNG log bonus ở đây)
-        log_row(user_id, username, "USER_CREATED", "0", "User mới tạo - chưa kích hoạt")
+        # ✅ Log bonus
+        log_row(user_id, username, "NEW_USER_BONUS", str(NEW_USER_BONUS), "Thưởng user mới - AUTO")
 
         # ✅ CACHE ROW NGAY
         try:
@@ -2222,17 +2214,17 @@ def handle_update(update):
         row = ensure_user_exists(user_id, username)
         row, balance, status = get_user_data(user_id)
 
-        # ✅ Message cho user mới (status = "new", chưa kích hoạt)
+        # ✅ Message cho user mới (đã AUTO active + 5100đ)
         if is_new_user:
             tg_send(
                 chat_id,
                 f"🎉 <b>CHÀO MỪNG BẠN MỚI!</b>\n\n"
                 f"👋 Xin chào <b>{username or 'bạn'}</b>\n\n"
-                f"🎁 <b>NHẬN NGAY {ACTIVE_GIFT_AMOUNT:,}đ KHI KÍCH HOẠT!</b>\n\n"
-                f"👇 <b>Bấm nút bên dưới để kích hoạt:</b>\n"
-                f"   🎊 <b>Kích Hoạt Tặng 5k</b>\n\n"
-                f"💰 Sau khi kích hoạt, bạn có thể bắt đầu mua voucher!",
-                build_main_keyboard(is_active=False)
+                f"🎁 Bạn nhận được <b>{NEW_USER_BONUS:,}đ</b> thưởng!\n"
+                f"💼 Số dư: <b>{balance:,}đ</b>\n"
+                f"📊 Trạng thái: <b>{status}</b>\n\n"
+                f"🛒 Bấm nút bên dưới để bắt đầu mua voucher",
+                build_main_keyboard(is_active=True)
             )
             return
 
@@ -2257,23 +2249,6 @@ def handle_update(update):
             f"📞 Hoặc liên hệ admin: @BonBonxHPx",
             build_main_keyboard(is_active=False)
         )
-        return
-
-    # ===== KÍCH HOẠT TẶNG 5K =====
-    if text == "🎊 Kích Hoạt Tặng 5k":
-        success, result = handle_active_gift_5k(user_id, username)
-        
-        if success:
-            tg_send(
-                chat_id,
-                f"🎉 <b>KÍCH HOẠT THÀNH CÔNG!</b>\n\n"
-                f"🎁 Bạn nhận được <b>{ACTIVE_GIFT_AMOUNT:,}đ</b> khuyến mãi!\n"
-                f"💼 Số dư mới: <b>{result:,}đ</b>\n\n"
-                f"🛒 Bấm <b>🎁 Lưu Voucher</b> để bắt đầu mua sắm!",
-                build_main_keyboard(is_active=True)
-            )
-        else:
-            tg_send(chat_id, result, build_main_keyboard(is_active=True))
         return
 
     # ===== NẠP TIỀN =====
