@@ -812,9 +812,9 @@ def get_user_row(user_id):
 
 def ensure_user_exists(user_id, username):
     """
-    ✅ Tạo user mới: balance = 5100đ AUTO, status = "active"
+    ✅ Tạo user MỚI: Auto active + 5100đ ngay
     
-    Không có logic kích hoạt phức tạp - user mới nhận ngay tiền
+    User KHÔNG cần bấm nút, nhận tiền ngay lập tức
     
     Schema: Tele ID | Username | Balance | Trang Thái | Chi Chú | note | Gift Status
     """
@@ -826,20 +826,20 @@ def ensure_user_exists(user_id, username):
         return row
 
     try:
-        # ✅ Tạo user mới: balance = 5100đ, status = "active"
+        # ✅ Tạo user mới: balance = 5100, status = "active" (AUTO)
         ws_money.append_row([
             str(user_id),      # A: Tele ID
             username,          # B: Username
-            NEW_USER_BONUS,    # C: Balance (5100đ AUTO)
-            "active",          # D: Trang Thái (active luôn)
+            NEW_USER_BONUS,    # C: Balance (5100đ - AUTO)
+            "active",          # D: Trang Thái (active - AUTO)
             "auto from bot",   # E: Chi Chú
             "",                # F: note (dùng cho ban/unban)
             ""                 # G: Gift Status
         ])
-        dprint(f"✅ Created new user {user_id} with {NEW_USER_BONUS:,}đ AUTO bonus")
+        dprint(f"✅ Created new user {user_id} with {NEW_USER_BONUS:,}đ bonus (AUTO)")
 
         # ✅ Log bonus
-        log_row(user_id, username, "NEW_USER_BONUS", str(NEW_USER_BONUS), "User mới - AUTO +5100đ")
+        log_row(user_id, username, "NEW_USER_BONUS", str(NEW_USER_BONUS), "Thưởng user mới - AUTO")
 
         # ✅ CACHE ROW NGAY
         try:
@@ -1677,11 +1677,7 @@ def handle_callback_query(cb):
         last_callback_time = CALLBACK_COOLDOWN.get(user_id, 0)
         if time.time() - last_callback_time < CALLBACK_COOLDOWN_SECONDS:
             tg_answer_callback(cb_id, "⏳ Chậm lại 1 chút", True)
-            
-            # 🔥 TRACK ERROR → Tích lũy spam → Auto ban
-            track_error(user_id, from_user.get("username", ""), "SPAM_CALLBACK")
-            
-            dprint(f"⏳ Callback spam detected: user {user_id}")
+            dprint(f"⏳ Callback rate-limited: user {user_id}")
             return
         
         CALLBACK_COOLDOWN[user_id] = time.time()
@@ -1689,6 +1685,10 @@ def handle_callback_query(cb):
         row, balance, status = get_user_data(user_id)
         if not row:
             tg_answer_callback(cb_id, "❌ Bạn chưa có ID", True)
+            return
+
+        if status != "active":
+            tg_answer_callback(cb_id, "❌ Tài khoản chưa được kích hoạt", True)
             return
 
         if user_id in PENDING_VOUCHER:
@@ -2214,25 +2214,35 @@ def handle_update(update):
         row = ensure_user_exists(user_id, username)
         row, balance, status = get_user_data(user_id)
 
-        # ✅ User mới - Hiển thị đã nhận 5100đ
+        # ✅ Message cho user mới (đã AUTO active + 5100đ)
         if is_new_user:
             tg_send(
                 chat_id,
                 f"🎉 <b>CHÀO MỪNG BẠN MỚI!</b>\n\n"
                 f"👋 Xin chào <b>{username or 'bạn'}</b>\n\n"
                 f"🎁 Bạn nhận được <b>{NEW_USER_BONUS:,}đ</b> thưởng!\n"
-                f"💼 Số dư hiện tại: <b>{balance:,}đ</b>\n\n"
-                f"🛒 Bấm nút bên dưới để bắt đầu mua voucher!",
-                build_main_keyboard()
+                f"💼 Số dư: <b>{balance:,}đ</b>\n"
+                f"📊 Trạng thái: <b>{status}</b>\n\n"
+                f"🛒 Bấm nút bên dưới để bắt đầu mua voucher",
+                build_main_keyboard(is_active=True)
             )
             return
 
-        # ✅ User cũ - Chào mừng quay lại
+        # ✅ User cũ - Auto fix status nếu chưa active
+        if status != "active":
+            try:
+                ws_money.update_cell(row, 4, "active")
+                dprint(f"✅ Auto fixed status for user {user_id}: {status} → active")
+                status = "active"
+            except Exception as e:
+                dprint(f"❌ Failed to update status: {e}")
+
+        # ✅ User cũ - Luôn hiển thị "Chào mừng quay lại"
         tg_send(
             chat_id,
             f"👋 <b>Chào mừng quay lại!</b>\n\n"
             f"💼 Số dư: <b>{balance:,}đ</b>",
-            build_main_keyboard()
+            build_main_keyboard(is_active=True)
         )
         return
 
@@ -2263,7 +2273,7 @@ def handle_update(update):
     # ===== USER DATA =====
     row, balance, status = get_user_data(user_id)
     if not row:
-        tg_send(chat_id, "❌ Bạn chưa có ID. Bấm /start để tạo tài khoản.")
+        tg_send(chat_id, "❌ Bạn chưa có ID. Bấm /start để kích hoạt.")
         return
 
     # ===== SỐ DƯ =====
@@ -2271,10 +2281,7 @@ def handle_update(update):
         # ✅ RATE LIMIT: 1 lần/3s per user
         last_balance_check = CALLBACK_COOLDOWN.get(f"balance_{user_id}", 0)
         if time.time() - last_balance_check < 3:
-            # 🔥 TRACK ERROR → Tích lũy spam → Auto ban
-            track_error(user_id, username, "SPAM_COMMAND")
-            
-            dprint(f"⏳ Balance check spam detected: user {user_id}")
+            dprint(f"⏳ Balance check rate-limited: user {user_id}")
             return  # Silent ignore (không spam user)
         
         CALLBACK_COOLDOWN[f"balance_{user_id}"] = time.time()
@@ -2292,7 +2299,7 @@ def handle_update(update):
             chat_id,
             f"💰 <b>Số dư:</b> <b>{balance:,}đ</b>\n"
             f"📌 Trạng thái: <b>{status}</b>",
-            build_main_keyboard()
+            build_main_keyboard(is_active=(status == "active"))
         )
         return
 
@@ -2330,6 +2337,16 @@ def handle_update(update):
             build_voucher_info_text(),
             build_quick_voucher_keyboard()
         )
+        return
+
+    # ===== CHẶN LƯU NẾU CHƯA ACTIVE =====
+    if status != "active" and (
+        text.startswith("/voucher")
+        or text.startswith("/combo")
+        or user_id in PENDING_VOUCHER
+    ):
+        tg_send(chat_id, "❌ Tài khoản chưa được kích hoạt.")
+        # ✅ KHÔNG track_error - user thật có thể chưa active
         return
 
     # ===== ĐANG CHỜ COOKIE =====
@@ -2452,27 +2469,17 @@ def handle_update(update):
         success_count, total_count, failed_details = save_voucher_multi_cookies(cookies, v)
 
         if success_count == 0:
-            # ✅ HOÀN TIỀN ATOMIC
+            # ✅ HOÀN TIỀN ATOMIC vì không lưu được cookie nào
             update_balance_atomic(user_id, total_price)  # ← ATOMIC
             
             # UI: Hiển thị balance TRỰC TIẾP từ Sheet
             real_balance = get_balance_direct(user_id)
             
-            # 🔍 Log chi tiết lỗi để debug
-            error_details = "\n".join([f"Cookie #{idx}: {reason}" for idx, reason in failed_details[:3]])
-            dprint(f"❌ VOUCHER FAIL | User: {user_id} | Voucher: {cmd} | Errors:\n{error_details}")
-            
             tg_send(
                 chat_id,
                 f"❌ Không lưu được cookie nào\n"
                 f"💸 Đã hoàn tiền: +{total_price:,}đ\n"
-                f"💰 Số dư hiện tại: <b>{real_balance:,}đ</b>\n\n"
-                f"🔍 <b>Chi tiết lỗi:</b>\n{error_details}\n\n"
-                f"💡 <b>Nguyên nhân có thể:</b>\n"
-                f"• Cookie hết hạn / không hợp lệ\n"
-                f"• Voucher đã hết mã\n"
-                f"• Cookie đã lưu voucher này rồi\n\n"
-                f"👉 Vui lòng thử lại với cookie mới!"
+                f"💰 Số dư hiện tại: <b>{real_balance:,}đ</b>"
             )
             # ✅ KHÔNG track_error - cookie lỗi/Shopee lỗi là lỗi nghiệp vụ
             return
@@ -2674,21 +2681,11 @@ def handle_update(update):
             # UI: Hiển thị balance TRỰC TIẾP từ Sheet
             real_balance = get_balance_direct(user_id)
             
-            # 🔍 Log chi tiết lỗi để debug
-            error_details = "\n".join([f"Cookie #{idx}: {reason}" for idx, reason in failed_details[:3]])
-            dprint(f"❌ VOUCHER FAIL | User: {user_id} | Voucher: {cmd} | Errors:\n{error_details}")
-            
             tg_send(
                 chat_id,
                 f"❌ Không lưu được cookie nào\n"
                 f"💸 Đã hoàn tiền: +{total_price:,}đ\n"
-                f"💰 Số dư hiện tại: <b>{real_balance:,}đ</b>\n\n"
-                f"🔍 <b>Chi tiết lỗi:</b>\n{error_details}\n\n"
-                f"💡 <b>Nguyên nhân có thể:</b>\n"
-                f"• Cookie hết hạn / không hợp lệ\n"
-                f"• Voucher đã hết mã\n"
-                f"• Cookie đã lưu voucher này rồi\n\n"
-                f"👉 Vui lòng thử lại với cookie mới!"
+                f"💰 Số dư hiện tại: <b>{real_balance:,}đ</b>"
             )
             # ✅ KHÔNG track_error - lỗi nghiệp vụ
             return
