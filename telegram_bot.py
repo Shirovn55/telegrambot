@@ -14,11 +14,13 @@ NgânMiu.Store — Telegram Bot
 import os
 import json
 import re
+import unicodedata
 import requests
 from datetime import datetime, timedelta, timezone
 from flask import Flask, request
 import urllib.parse
 import time
+import traceback
 from collections import deque  # ✅ Thêm deque cho PROCESSED_UPDATE_IDS
 
 # =========================================================
@@ -77,11 +79,45 @@ ACTIVE_GIFT_AMOUNT = 5100
 # ✅ STATUS CHO PHÉP NHẬN GIFT (chặt chẽ, tránh abuse)
 ALLOWED_GIFT_STATUS = ["", "new", "pending"]  # Admin set "inactive" → KHÔNG được nhận
 
+# =========================================================
+# 🔥 QR LOGIN CONFIG
+# =========================================================
+QR_API_BASE = os.getenv("QR_API_BASE", "https://qr-shopee-rho.vercel.app").strip()
+QR_POLL_INTERVAL = 3.0  # giây check 1 lần
+QR_TIMEOUT = 300  # 5 phút timeout
+COOKIE_VALIDITY_DAYS = 7  # Cookie hiệu lực 7 ngày
+
+# QR Session Management
+import threading
+qr_sessions = {}  # {session_id: {"user_id": user_id, "created": timestamp, "status": "waiting", "qr_image": base64}}
+qr_lock = threading.Lock()
+
+# QR Failure Tracking (chống spam get QR)
+qr_failures = {}  # {user_id: {"count": int, "last_fail": timestamp}}
+qr_failures_lock = threading.Lock()
+MAX_QR_FAILURES = 5  # 5 lần thất bại liên tục → ban vĩnh viễn
+
+# Cookie storage cho voucher nhanh
+user_last_cookies = {}  # {user_id: {"cookie": str, "timestamp": float}}
+user_cookies_lock = threading.Lock()
+
 TOPUP_BONUS_RULES = [
     (100000, 0.20),
     (50000,  0.15),
     (20000,  0.10),
 ]
+
+
+def normalize_voucher_key(s: str) -> str:
+    """Chuẩn hoá key voucher để match ổn định (xoá mọi whitespace kể cả NBSP)."""
+    if s is None:
+        return ""
+    s = str(s)
+    s = unicodedata.normalize("NFKC", s)
+    s = s.strip().lower()
+    s = re.sub(r"\s+", "", s)  # space/tab/NBSP/newline...
+    return s
+
 
 def calc_topup_bonus(amount):
     for min_amount, percent in TOPUP_BONUS_RULES:
@@ -373,20 +409,38 @@ def tg_send(chat_id, text, reply_markup=None):
         dprint("tg_send error:", e)
 
 def tg_send_photo(chat_id, photo, caption=None, reply_markup=None):
-    payload = {
-        "chat_id": chat_id,
-        "photo": photo,
-        "parse_mode": "HTML"
-    }
+    payload = {"chat_id": chat_id, "parse_mode": "HTML"}
     if caption:
         payload["caption"] = caption
     if reply_markup:
         payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
 
     try:
-        requests.post(f"{BASE_URL}/sendPhoto", data=payload, timeout=20)
+        # ✅ Nếu là URL (nạp tiền / ảnh online) → gửi thẳng
+        if isinstance(photo, str) and (photo.startswith("http://") or photo.startswith("https://")):
+            payload["photo"] = photo
+            requests.post(f"{BASE_URL}/sendPhoto", data=payload, timeout=20)
+            return
+
+        # ✅ Nếu là base64 (QR login) → multipart
+        import base64
+        photo_bytes = base64.b64decode(photo)
+        files = {"photo": ("qr.png", photo_bytes, "image/png")}
+        requests.post(f"{BASE_URL}/sendPhoto", data=payload, files=files, timeout=20)
+
     except Exception as e:
         dprint("tg_send_photo error:", e)
+        if caption:
+            tg_send(chat_id, f"📷 {caption}\n\n❌ Không thể gửi ảnh QR")
+
+# Wrapper cho QR functions
+def send_photo(chat_id, photo, caption=None, reply_markup=None):
+    """Alias cho QR functions - support reply_markup"""
+    tg_send_photo(chat_id, photo, caption, reply_markup)
+
+def send_message(chat_id, text, reply_markup=None):
+    """Alias cho QR functions"""
+    tg_send(chat_id, text, reply_markup)
 
 def tg_answer_callback(callback_id, text=None, show_alert=False):
     payload = {
@@ -424,16 +478,575 @@ def tg_edit_message(chat_id, message_id, text, reply_markup=None):
 # =========================================================
 def build_main_keyboard(is_active=True):
     """
-    Keyboard chính - User mới luôn active ngay nên chỉ cần 1 keyboard
+    Keyboard chính - 2 nút mỗi hàng cho gọn
     """
     return {
         "keyboard": [
-            ["💎 Nạp tiền"],
-            ["💰 Số dư", "🎁 Lưu Voucher"],
-            ["🧩 Hệ Thống Bot NgânMiu"]
+            ["💎 Nạp tiền", "💰 Số dư"],
+            ["🎁 Lưu Voucher", "🔑 Get Cookie QR"],
+            ["🧩 Hệ Thống Bot"]
         ],
         "resize_keyboard": True
     }
+
+# =========================================================
+# 🔥 QR LOGIN FUNCTIONS
+# =========================================================
+def create_qr_session(user_id):
+    """Tạo QR session mới"""
+    url = f"{QR_API_BASE}/api/qr/create"
+    payload = {"user_id": user_id}
+    
+    dprint(f"[QR CREATE] URL: {url}")
+    dprint(f"[QR CREATE] Payload: {payload}")
+    
+    try:
+        response = requests.post(
+            url,
+            json=payload,
+            timeout=10
+        )
+        
+        dprint(f"[QR CREATE] Status code: {response.status_code}")
+        dprint(f"[QR CREATE] Response text: {response.text[:200]}")
+
+        if response.status_code != 200:
+            return False, f"API error: {response.status_code}", ""
+
+        data = response.json()
+        dprint(f"[QR CREATE] Response JSON: {data}")
+
+        if not data.get("success"):
+            error_msg = data.get("error", "Unknown error")
+            return False, f"Create QR failed: {error_msg}", ""
+
+        session_id = data.get("session_id")
+        qr_image = data.get("qr_image", "").replace("data:image/png;base64,", "")
+        
+        dprint(f"[QR CREATE] Session ID: {session_id}")
+        dprint(f"[QR CREATE] QR image length: {len(qr_image)}")
+
+        # Lưu session
+        with qr_lock:
+            qr_sessions[session_id] = {
+                "user_id": user_id,
+                "created": time.time(),
+                "status": "waiting",
+                "qr_image": qr_image,
+                "cookie": "",
+                "cancelled": False  # ← Thêm cancelled flag
+            }
+
+        return True, session_id, qr_image
+
+    except Exception as e:
+        dprint(f"[QR CREATE] Exception: {e}")
+        dprint(f"[QR CREATE] Traceback: {traceback.format_exc()}")
+        return False, f"Error: {str(e)}", ""
+
+def check_qr_status(session_id):
+    """Check QR status"""
+    try:
+        response = requests.get(
+            f"{QR_API_BASE}/api/qr/status/{session_id}",
+            timeout=10
+        )
+
+        if response.status_code != 200:
+            return False, f"API error: {response.status_code}", False, None, None
+
+        data = response.json()
+
+        if not data.get("success"):
+            return False, data.get("error", "Check failed"), False, None, None
+
+        status = (data.get("status") or "").upper()
+        has_token = data.get("has_token", False)
+        cookie_st = data.get("cookie_st", "")
+        cookie_f = data.get("cookie_f", "")
+
+        return True, status, has_token, cookie_st, cookie_f
+
+    except Exception as e:
+        return False, f"Error: {str(e)}", False, None, None
+
+def get_qr_cookie(session_id):
+    """Lấy cookie sau khi quét QR - CHỈ TRẢ COOKIE ST"""
+    dprint(f"[QR COOKIE] Getting cookie for session {session_id}")
+    
+    try:
+        url = f"{QR_API_BASE}/api/qr/login/{session_id}"
+        dprint(f"[QR COOKIE] URL: {url}")
+        
+        response = requests.post(url, timeout=10)
+        
+        dprint(f"[QR COOKIE] Status: {response.status_code}")
+
+        if response.status_code != 200:
+            dprint(f"[QR COOKIE] Error: HTTP {response.status_code}")
+            return False, f"API error: {response.status_code}"
+
+        data = response.json()
+        dprint(f"[QR COOKIE] Response: {data}")
+
+        if not data.get("success"):
+            error_msg = data.get("error", "Login failed")
+            dprint(f"[QR COOKIE] API error: {error_msg}")
+            return False, f"Login failed: {error_msg}"
+
+        # ✅ API trả "cookie" - lấy full cookie luôn
+        full_cookie = data.get("cookie", "")
+        
+        if not full_cookie:
+            dprint(f"[QR COOKIE] No cookie in response")
+            return False, "No cookie returned"
+        
+        dprint(f"[QR COOKIE] Got cookie: {full_cookie[:50]}...")
+        
+        return True, full_cookie
+
+    except Exception as e:
+        dprint(f"[QR COOKIE] Exception: {e}")
+        return False, f"Error: {str(e)}"
+
+def inline_qr_keyboard(session_id):
+    """Inline keyboard 2 nút ngang giống bot gốc"""
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "🔄 Lấy Cookie", "callback_data": f"qr_check:{session_id}"},
+                {"text": "❌ Hủy", "callback_data": f"qr_cancel:{session_id}"}
+            ]
+        ]
+    }
+
+def build_quick_save_keyboard():
+    """
+    Keyboard lưu voucher nhanh sau khi lấy cookie
+    ✅ TỰ ĐỘNG LẤY TỪ SHEET (như keyboard chính)
+    """
+    if not SHEET_READY:
+        # Fallback: Keyboard tĩnh nếu sheet lỗi
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "⭐ Mã 100k 0đ", "callback_data": "QUICK_SAVE:ma100k0d"},
+                    {"text": "⭐ Mã 50% Max 100k", "callback_data": "QUICK_SAVE:ma50max100k"}
+                ],
+                [{"text": "🔙 Về menu chính", "callback_data": "QUICK_SAVE:back"}]
+            ]
+        }
+    
+    try:
+        # Đọc từ VoucherStock sheet
+        all_rows = ws_voucher.get_all_records()
+        
+        buttons = []
+        button_row = []
+        
+        for row in all_rows:
+            # Check Display
+            display = ""
+            for key in ["Display", "Show", "Visible", "Hiển thị", "Hiển Thị"]:
+                if key in row:
+                    display = str(row[key]).strip().upper()
+                    if display:
+                        break
+            
+            if display not in ["YES", "Y", "TRUE", "1"]:
+                continue
+            
+            # Check Trạng Thái
+            trang_thai = str(row.get("Trạng Thái", "")).strip()
+            if trang_thai != "Còn Mã":
+                continue
+            
+            # Lấy thông tin voucher
+            ten_hien_thi = ""
+            for key in ["Display Name", "Tên hiển thị", "Tên Hiển Thị", "display_name"]:
+                if key in row:
+                    ten_hien_thi = str(row[key]).strip()
+                    if ten_hien_thi:
+                        break
+            
+            if not ten_hien_thi:
+                ten_hien_thi = str(row.get("Tên Mã", "")).strip()
+            
+            ten_ma = str(row.get("Tên Mã", "")).strip()
+            
+            if not ten_ma:
+                continue
+            
+            # Tạo callback_data từ tên mã (normalize)
+            callback_key = normalize_voucher_key(ten_ma)
+            
+            # Thêm vào button
+            button_row.append({
+                "text": f"⭐ {ten_hien_thi}",
+                "callback_data": f"QUICK_SAVE:{callback_key}"
+            })
+            
+            # 2 button mỗi row
+            if len(button_row) == 2:
+                buttons.append(button_row)
+                button_row = []
+        
+        # Thêm row cuối nếu có button lẻ
+        if button_row:
+            buttons.append(button_row)
+        
+        # Nếu không có voucher nào
+        if not buttons:
+            buttons.append([
+                {"text": "⚠️ Chưa có voucher", "callback_data": "QUICK_SAVE:back"}
+            ])
+        
+        # Thêm nút Về menu
+        buttons.append([{"text": "🔙 Về menu chính", "callback_data": "QUICK_SAVE:back"}])
+        
+        dprint(f"[QUICK_SAVE] Built keyboard with {len(buttons)-1} rows")
+        
+        return {"inline_keyboard": buttons}
+        
+    except Exception as e:
+        dprint(f"[ERROR] build_quick_save_keyboard: {e}")
+        # Fallback
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "⭐ Mã 100k 0đ", "callback_data": "QUICK_SAVE:ma100k0d"},
+                    {"text": "⭐ Mã 50% Max 100k", "callback_data": "QUICK_SAVE:ma50max100k"}
+                ],
+                [{"text": "🔙 Về menu chính", "callback_data": "QUICK_SAVE:back"}]
+            ]
+        }
+
+def track_qr_failure(user_id, username, chat_id):
+    """
+    Track QR failures và ban user nếu spam
+    Returns: True nếu user bị ban, False nếu OK
+    """
+    with qr_failures_lock:
+        now = time.time()
+        
+        if user_id not in qr_failures:
+            qr_failures[user_id] = {"count": 1, "last_fail": now}
+            return False
+        
+        # Reset nếu lần fail cuối cách xa hơn 5 phút
+        if now - qr_failures[user_id]["last_fail"] > 300:
+            qr_failures[user_id] = {"count": 1, "last_fail": now}
+            return False
+        
+        # Tăng count
+        qr_failures[user_id]["count"] += 1
+        qr_failures[user_id]["last_fail"] = now
+        
+        fail_count = qr_failures[user_id]["count"]
+        
+        # Ban vĩnh viễn nếu >= 5 lần
+        if fail_count >= MAX_QR_FAILURES:
+            # Ban user trong sheet
+            try:
+                row, _, _ = get_user_data(user_id)
+                if row:
+                    # Update trạng thái: Ban vĩnh viễn
+                    ws_money.update(f'D{row}', [["BANNED_QR_SPAM"]])
+                    
+                    # Thông báo admin
+                    admin_msg = (
+                        f"🚨 <b>BAN VĨNH VIỄN - QR SPAM</b>\n\n"
+                        f"👤 <b>User ID:</b> <code>{user_id}</code>\n"
+                        f"📝 <b>Username:</b> @{username or 'N/A'}\n"
+                        f"🔢 <b>Số lần thất bại:</b> {fail_count}\n"
+                        f"⏰ <b>Thời gian:</b> {now_str()}\n\n"
+                        f"⚠️ <b>Lý do:</b> Get QR thất bại {fail_count} lần liên tục"
+                    )
+                    tg_send(ADMIN_ID, admin_msg)
+                    
+                    dprint(f"🚨 BANNED USER {user_id} for QR spam ({fail_count} failures)")
+            except Exception as e:
+                dprint(f"Error banning user {user_id}: {e}")
+            
+            return True
+        
+        return False
+
+def save_user_cookie(user_id, cookie):
+    """Lưu cookie của user để dùng cho voucher nhanh"""
+    with user_cookies_lock:
+        user_last_cookies[user_id] = {
+            "cookie": cookie,
+            "timestamp": time.time()
+        }
+
+def get_user_cookie(user_id):
+    """Lấy cookie đã lưu của user (trong vòng 1 giờ)"""
+    with user_cookies_lock:
+        if user_id not in user_last_cookies:
+            return None
+        
+        cookie_data = user_last_cookies[user_id]
+        
+        # Cookie hết hạn sau 1 giờ
+        if time.time() - cookie_data["timestamp"] > 3600:
+            del user_last_cookies[user_id]
+            return None
+        
+        return cookie_data["cookie"]
+
+def handle_get_cookie_qr(chat_id, user_id, username):
+    """Xử lý lệnh Get Cookie QR - Y HỆT bot gốc"""
+    # Check user tồn tại
+    row, balance, status = get_user_data(user_id)
+    if not row:
+        send_message(chat_id, "❌ Vui lòng /start trước khi dùng chức năng này")
+        return
+
+    # Message đang tạo QR
+    send_message(chat_id, "🔄 <b>Đang tạo mã QR đăng nhập Shopee...</b>")
+
+    # Tạo QR session
+    success, result, qr_image = create_qr_session(user_id)
+
+    if not success:
+        send_message(chat_id, f"❌ <b>Lỗi tạo QR:</b>\n{result}", build_main_keyboard())
+        return
+
+    session_id = result
+
+    # Caption giống y bot gốc
+    caption = (
+        "🔑 <b>QR LOGIN SHOPEE</b>\n\n"
+        "📍 <b>Hướng dẫn:</b>\n"
+        "1️⃣ <b>Mở app Shopee</b>\n"
+        "2️⃣ <b>Ở Trang Chủ → Góc trên bên trái → Ô Vuông cạnh Shopee Pay</b>\n"
+        "3️⃣ <b>Bấm vào để Quét QR</b>\n"
+        "4️⃣ <b>Quét mã QR bên dưới</b>\n"
+        "5️⃣ <b>Quét xong bấm Lấy Cookie để nhận cookie</b>\n\n"
+        "⏰ Mã QR có hiệu lực trong <b>5 phút</b>"
+    )
+
+    # Gửi QR với 2 nút ngang
+    try:
+        send_photo(chat_id, qr_image, caption=caption, reply_markup=inline_qr_keyboard(session_id))
+    except Exception as e:
+        dprint(f"[QR] Send photo error: {e}")
+        send_message(chat_id, f"{caption}\n\n❌ <b>Không thể tạo ảnh QR, vui lòng thử lại sau.</b>")
+        return
+
+    # Lưu thông tin session
+    with qr_lock:
+        if session_id in qr_sessions:
+            qr_sessions[session_id]["chat_id"] = chat_id
+            qr_sessions[session_id]["username"] = username
+
+    # KHÔNG TỰ ĐỘNG CHECK - Chỉ check khi user bấm nút
+    dprint(f"[QR] Session {session_id} created, waiting for user action")
+
+def auto_watch_qr_and_send_cookie(session_id, chat_id, user_id, username):
+    """
+    Tự động theo dõi QR và gửi cookie khi quét xong
+    ✅ Tối ưu: Chỉ check khi status thay đổi
+    """
+    dprint(f"[QR AUTO WATCH] Started for user {user_id}, session {session_id}")
+    
+    time.sleep(3)  # Delay 3s trước khi bắt đầu
+
+    start_time = time.time()
+    check_count = 0
+    last_status = None
+    
+    while time.time() - start_time < QR_TIMEOUT:
+        check_count += 1
+        
+        # ✅ CHECK CANCELLED TRƯỚC
+        with qr_lock:
+            if session_id not in qr_sessions:
+                dprint(f"[QR AUTO WATCH] Session {session_id} cancelled, stopping")
+                return
+            
+            session = qr_sessions.get(session_id, {})
+            if session.get("cancelled"):
+                dprint(f"[QR AUTO WATCH] Session {session_id} marked as cancelled")
+                return
+        
+        success, status, has_token, cookie_st, cookie_f = check_qr_status(session_id)
+
+        if not success:
+            time.sleep(QR_POLL_INTERVAL)
+            continue
+
+        # ✅ CHỈ LOG KHI STATUS THAY ĐỔI (giảm spam log)
+        if status != last_status:
+            dprint(f"[QR AUTO WATCH] Check #{check_count} - Status: {status}, has_token: {has_token}")
+            last_status = status
+
+        # Check nếu đã quét xong
+        if has_token and cookie_st:
+            dprint(f"[QR AUTO WATCH] QR scanned! Getting full cookie...")
+            
+            # Lấy cookie đầy đủ
+            success_login, cookie_st_full, cookie_f_full, user_info = get_qr_cookie(session_id)
+
+            if success_login:
+                dprint(f"[QR AUTO WATCH] Cookie retrieved successfully")
+                
+                # Tính ngày hết hạn
+                expiry_date = now_datetime() + timedelta(days=COOKIE_VALIDITY_DAYS)
+
+                # Format cookie
+                full_cookie = f"SPC_ST={cookie_st_full}; SPC_F={cookie_f_full};"
+                
+                # Lưu cookie cho voucher nhanh
+                save_user_cookie(user_id, full_cookie)
+
+                # Username
+                username_display = ""
+                if user_info and user_info.get("username"):
+                    username_display = f"👤 <b>User:</b> {user_info['username']}\n\n"
+
+                # Gửi cookie
+                send_message(
+                    chat_id,
+                    "🎉 <b>LẤY COOKIE THÀNH CÔNG!</b>\n\n"
+                    f"{username_display}"
+                    f"🍪 <b>Cookie:</b>\n<code>{full_cookie}</code>\n\n"
+                    f"💡 <i>Tap vào cookie để auto copy</i>\n\n"
+                    f"⏰ <b>Hiệu lực:</b> {COOKIE_VALIDITY_DAYS} ngày (đến {expiry_date.strftime('%d/%m/%Y')})\n"
+                    f"⚠️ <b>Bảo mật tuyệt đối!</b>"
+                )
+                
+                # Gửi keyboard voucher nhanh
+                time.sleep(0.5)
+                send_message(
+                    chat_id,
+                    "⚡ <b>LƯU VOUCHER NHANH</b>\n\n"
+                    "👇 Chọn voucher muốn lưu:",
+                    reply_markup=build_quick_save_keyboard()
+                )
+                
+                # Reset failure count khi thành công
+                with qr_failures_lock:
+                    if user_id in qr_failures:
+                        del qr_failures[user_id]
+                
+                return
+            else:
+                dprint(f"[QR AUTO WATCH] Failed to get full cookie")
+
+        time.sleep(QR_POLL_INTERVAL)
+
+    # Timeout
+    dprint(f"[QR AUTO WATCH] Timeout for session {session_id}")
+    
+    # Track failure
+    is_banned = track_qr_failure(user_id, username, chat_id)
+    
+    if is_banned:
+        send_message(
+            chat_id,
+            "🚫 <b>TÀI KHOẢN BỊ KHÓA VĨNH VIỄN</b>\n\n"
+            "⚠️ <b>Lý do:</b> Get QR thất bại quá nhiều lần\n\n"
+            "📞 <b>Liên hệ Admin:</b> @BonBonxHPx"
+        )
+    else:
+        fail_count = qr_failures.get(user_id, {}).get("count", 0)
+        warning = ""
+        if fail_count >= 3:
+            warning = f"\n\n⚠️ <b>Cảnh báo:</b> {fail_count}/{MAX_QR_FAILURES} lần"
+        
+        send_message(
+            chat_id,
+            f"⏰ <b>HẾT THỜI GIAN</b>\n\n"
+            f"Vui lòng Get Cookie QR lại{warning}",
+            reply_markup=build_main_keyboard()
+        )
+
+def handle_qr_check(chat_id, user_id, session_id):
+    """Xử lý callback Lấy Cookie"""
+    dprint(f"[QR CHECK] User {user_id} checking session {session_id}")
+    
+    # ✅ GỬI MESSAGE "ĐANG LẤY COOKIE..."
+    send_message(chat_id, "⏳ <b>Đang lấy cookie...</b>")
+    
+    success, status, has_token, cookie_st, cookie_f = check_qr_status(session_id)
+    
+    dprint(f"[QR CHECK] check_qr_status result: success={success}, status={status}, has_token={has_token}")
+
+    if not success:
+        dprint(f"[QR CHECK] Check failed: {status}")
+        send_message(chat_id, f"❌ <b>Lỗi:</b> {status}")
+        return
+
+    # ✅ Chỉ check has_token (API /status không trả cookie)
+    if has_token:
+        dprint(f"[QR CHECK] Has token, getting full cookie...")
+        
+        # Lấy cookie - CHỈ TRẢ 2 GIÁ TRỊ
+        success_login, cookie = get_qr_cookie(session_id)
+        
+        dprint(f"[QR CHECK] get_qr_cookie result: success={success_login}")
+
+        if success_login:
+            dprint(f"[QR CHECK] Cookie retrieved successfully")
+            dprint(f"[QR CHECK] Cookie length: {len(cookie)}")
+            
+            # Lưu cookie cho voucher nhanh
+            save_user_cookie(user_id, cookie)
+            
+            # Tính ngày hết hạn
+            expiry_date = now_datetime() + timedelta(days=COOKIE_VALIDITY_DAYS)
+
+            send_message(
+                chat_id,
+                "🎉 <b>LẤY COOKIE THÀNH CÔNG!</b>\n\n"
+                f"🍪 <b>Cookie:</b>\n<code>{cookie}</code>\n\n"
+                f"💡 <i>Tap vào cookie để auto copy</i>\n\n"
+                f"⏰ <b>Hiệu lực:</b> {COOKIE_VALIDITY_DAYS} ngày (đến {expiry_date.strftime('%d/%m/%Y')})\n"
+                f"⚠️ <b>Bảo mật tuyệt đối!</b>"
+            )
+            
+            # Gửi keyboard voucher nhanh
+            time.sleep(0.5)
+            send_message(
+                chat_id,
+                "⚡ <b>LƯU VOUCHER NHANH</b>\n\n"
+                "👇 Chọn voucher muốn lưu:",
+                reply_markup=build_quick_save_keyboard()
+            )
+            
+            # Xóa session
+            with qr_lock:
+                if session_id in qr_sessions:
+                    del qr_sessions[session_id]
+            
+            # Reset failure count
+            with qr_failures_lock:
+                if user_id in qr_failures:
+                    del qr_failures[user_id]
+        else:
+            dprint(f"[QR CHECK] Get cookie failed: {cookie}")
+            send_message(chat_id, f"❌ <b>Lỗi lấy cookie</b>\n\n{cookie}")
+    else:
+        dprint(f"[QR CHECK] Not ready - has_token={has_token}, cookie_st={cookie_st is not None}")
+        send_message(chat_id, f"⏳ <b>Trạng thái:</b> {status}\n\nVui lòng quét QR trong app Shopee")
+
+def handle_qr_cancel(chat_id, session_id):
+    """Xử lý callback hủy QR"""
+    dprint(f"[QR CANCEL] User cancelled session {session_id}")
+    
+    with qr_lock:
+        if session_id in qr_sessions:
+            # Set cancelled flag để thread dừng
+            qr_sessions[session_id]["cancelled"] = True
+            dprint(f"[QR CANCEL] Marked session {session_id} as cancelled")
+
+    send_message(
+        chat_id,
+        "❌ <b>ĐÃ HỦY</b>\n\nBấm <b>🔑 Get Cookie QR</b> để tạo mã mới",
+        reply_markup=build_main_keyboard()
+    )
 
 # =========================================================
 # UTIL
@@ -623,6 +1236,33 @@ def log_row(user_id, username, action, value="", note=""):
         ws_log.append_row([now_str(), str(user_id), username, action, value, note])
     except Exception as e:
         dprint("log_row error:", e)
+
+def log_voucher_save(user_id, username, voucher_name, num_cookies, price, balance_after, status):
+    """
+    Log voucher save action
+    
+    Args:
+        user_id: Telegram user ID
+        username: Telegram username
+        voucher_name: Tên voucher
+        num_cookies: Số lượng cookie
+        price: Tổng tiền
+        balance_after: Số dư sau khi lưu
+        status: Trạng thái (✅ hoặc ❌ + lỗi)
+    """
+    if not SHEET_READY:
+        return
+    try:
+        ws_log.append_row([
+            now_str(),
+            str(user_id),
+            username,
+            f"SAVE_VOUCHER",
+            f"{voucher_name} x{num_cookies}",
+            f"{status} | Price: {price:,}đ | Balance: {balance_after:,}đ"
+        ])
+    except Exception as e:
+        dprint(f"log_voucher_save error: {e}")
 
 # =========================================================
 # ✅ ANTI-SPAM SYSTEM
@@ -1109,8 +1749,8 @@ def get_voucher(cmd):
     rows = get_voucher_stock_cached()
 
     for r in rows:
-        name = str(r.get("Tên Mã", "")).replace(" ", "").lower()
-        if name == cmd.lower():
+        name = normalize_voucher_key(r.get("Tên Mã", ""))
+        if name == normalize_voucher_key(cmd):
             if r.get("Trạng Thái") != "Còn Mã":
                 return None, "Lưu thất Bại. Vui lòng kiểm tra lại cookie - mã"
             return r, None
@@ -1148,16 +1788,65 @@ def save_voucher_and_check(cookie, voucher):
             return False, "INVALID_RESPONSE"
 
         resp = js["responses"][0]
+        error_code = resp.get("error", 0)
 
-        if resp.get("error") == 0:
+        # ✅ SUCCESS
+        if error_code == 0:
             return True, "OK"
+        
+        # ❌ ERROR CODE 5: Không đủ điều kiện
+        if error_code == 5:
+            return False, "ACC_NOT_ELIGIBLE"
+        
+        # ❌ ERROR CODE 14: Đã lưu hoặc sử dụng trước đó
+        if error_code == 14:
+            return False, "VOUCHER_ALREADY_SAVED"
 
-        return False, f"SHOPEE_{resp.get('error')}"
+        # ❌ OTHER ERRORS
+        return False, f"SHOPEE_{error_code}"
 
     except requests.exceptions.Timeout:
         return False, "TIMEOUT"
     except Exception as e:
         return False, f"EXCEPTION_{str(e)}"
+
+def format_shopee_error(error_code):
+    """
+    Format lỗi Shopee thân thiện với user
+    
+    Args:
+        error_code: String error code từ save_voucher_and_check
+        
+    Returns:
+        Friendly error message
+    """
+    error_messages = {
+        "ACC_NOT_ELIGIBLE": "❌ <b>ACC KHÔNG ĐỦ ĐIỀU KIỆN</b>\n\n⚠️ Tài khoản Shopee không đủ điều kiện để lưu voucher này (Error 5)",
+        "VOUCHER_ALREADY_SAVED": "❌ <b>ĐÃ LƯU TRƯỚC ĐÓ</b>\n\n⚠️ ACC đã lưu hoặc sử dụng voucher này rồi (Error 14)",
+        "TIMEOUT": "❌ <b>TIMEOUT</b>\n\n⚠️ Shopee phản hồi quá chậm, vui lòng thử lại",
+        "INVALID_RESPONSE": "❌ <b>LỖI RESPONSE</b>\n\n⚠️ Shopee trả về dữ liệu không hợp lệ"
+    }
+    
+    # Check exact match
+    if error_code in error_messages:
+        return error_messages[error_code]
+    
+    # Check SHOPEE_ prefix
+    if error_code.startswith("SHOPEE_"):
+        code_number = error_code.split("_")[1]
+        return f"❌ <b>LỖI SHOPEE</b>\n\n⚠️ Mã lỗi: {code_number}"
+    
+    # Check HTTP_ prefix
+    if error_code.startswith("HTTP_"):
+        http_code = error_code.split("_")[1]
+        return f"❌ <b>LỖI HTTP</b>\n\n⚠️ HTTP {http_code}"
+    
+    # Check EXCEPTION_ prefix
+    if error_code.startswith("EXCEPTION_"):
+        return f"❌ <b>LỖI HỆ THỐNG</b>\n\n⚠️ {error_code}"
+    
+    # Default
+    return f"❌ <b>LỖI</b>\n\n⚠️ {error_code}"
 
 # =========================================================
 # ⭐ MULTI-COOKIE VOUCHER SAVER ⭐
@@ -1665,6 +2354,174 @@ def handle_callback_query(cb):
     data = cb.get("data", "")
     from_user = cb.get("from", {})
     user_id = from_user.get("id")
+    username = from_user.get("username", "")
+    chat_id = cb.get("message", {}).get("chat", {}).get("id")
+
+    # ===== QR CALLBACKS =====
+    if data.startswith("qr_check:"):
+        session_id = data.split(":", 1)[1]
+        tg_answer_callback(cb_id)
+        handle_qr_check(chat_id, user_id, session_id)
+        return
+
+    if data.startswith("qr_cancel:"):
+        session_id = data.split(":", 1)[1]
+        tg_answer_callback(cb_id)
+        handle_qr_cancel(chat_id, session_id)
+        return
+
+    # ===== QUICK SAVE VOUCHER CALLBACKS =====
+    if data.startswith("QUICK_SAVE:"):
+        voucher_key = data.split(":", 1)[1]
+        voucher_key = normalize_voucher_key(voucher_key)
+        
+        if voucher_key == "back":
+            tg_answer_callback(cb_id)
+            tg_send(chat_id, "👋 Đã quay về menu chính", build_main_keyboard())
+            return
+        
+        # Lấy cookie đã lưu
+        cookie = get_user_cookie(user_id)
+        
+        if not cookie:
+            tg_answer_callback(cb_id, "❌ Cookie đã hết hạn. Vui lòng Get Cookie QR lại!", True)
+            return
+        
+        # Check balance
+        row, balance, status = get_user_data(user_id)
+        if not row:
+            tg_answer_callback(cb_id, "❌ Bạn chưa có tài khoản", True)
+            return
+        
+        if status != "active":
+            tg_answer_callback(cb_id, "❌ Tài khoản chưa được kích hoạt", True)
+            return
+        
+        # ✅ GỬI MESSAGE "ĐANG LƯU VOUCHER..."
+        tg_answer_callback(cb_id)
+        tg_send(chat_id, "⏳ <b>Đang lưu voucher...</b>")
+        
+        # ✅ TÌM VOUCHER ĐỘNG TỪ SHEET (không dùng voucher_map)
+        # voucher_key đã normalize (no space, lowercase)
+        voucher_info = None
+        voucher_cmd = voucher_key  # ← FIX: Define voucher_cmd
+        err_msg = None
+        
+        try:
+            rows = get_voucher_stock_cached()
+            
+            for r in rows:
+                ten_ma = normalize_voucher_key(r.get("Tên Mã", ""))
+                if ten_ma == voucher_key:
+                    # Check trạng thái
+                    if r.get("Trạng Thái") != "Còn Mã":
+                        err_msg = "Voucher này tạm hết mã"
+                        break
+                    voucher_info = r
+                    voucher_cmd = r.get("Tên Mã", voucher_key)  # ← FIX: Lấy tên gốc
+                    break
+            
+            if not voucher_info and not err_msg:
+                err_msg = "Không tìm thấy voucher"
+        except Exception as e:
+            dprint(f"[ERROR] Finding voucher: {e}")
+            dprint(f"[ERROR] Traceback: {traceback.format_exc()}")
+            err_msg = f"Lỗi đọc sheet: {str(e)}"
+        
+        if not voucher_info:
+            tg_send(
+                chat_id,
+                f"❌ <b>LƯU THẤT BẠI</b>\n\n"
+                f"⚠️ Lỗi: {err_msg}"
+            )
+            return
+        
+        price = int(voucher_info.get("Giá", 0))
+        display_name = voucher_info.get("Tên Mã", voucher_key)
+        
+        # Check balance
+        if balance < price:
+            tg_send(
+                chat_id,
+                f"❌ <b>KHÔNG ĐỦ SỐ DƯ</b>\n\n"
+                f"💰 Cần: <b>{price:,}đ</b>\n"
+                f"💼 Số dư: <b>{balance:,}đ</b>\n"
+                f"💸 Thiếu: <b>{price - balance:,}đ</b>"
+            )
+            return
+        
+        # Trừ tiền trước
+        success, new_balance = deduct_balance_atomic(user_id, price)
+        
+        if not success:
+            tg_send(
+                chat_id,
+                f"❌ <b>TRỪ TIỀN THẤT BẠI</b>\n\n"
+                f"💰 Cần: <b>{price:,}đ</b>\n"
+                f"💼 Số dư: <b>{new_balance:,}đ</b>"
+            )
+            return
+        
+        # Lưu voucher
+        try:
+            ok, result = save_voucher_and_check(cookie, voucher_info)
+            
+            if ok:
+                # Thành công
+                real_balance = get_balance_direct(user_id)
+                
+                tg_send(
+                    chat_id,
+                    f"🎉 <b>LƯU THÀNH CÔNG</b>\n\n"
+                    f"✅ <b>{voucher_info.get('Tên Mã', voucher_cmd)}</b>\n"
+                    f"🍪 1 cookie\n"
+                    f"💰 <b>-{price:,}đ</b>\n"
+                    f"💼 Số dư: <b>{real_balance:,}đ</b>",
+                    build_main_keyboard()
+                )
+                
+                # Log
+                log_voucher_save(user_id, username, voucher_cmd, 1, price, real_balance, "✅")
+                
+            else:
+                # Thất bại → Hoàn tiền
+                update_balance_atomic(user_id, price)
+                real_balance = get_balance_direct(user_id)
+                
+                # Format lỗi thân thiện
+                error_message = format_shopee_error(result)
+                
+                tg_send(
+                    chat_id,
+                    f"{error_message}\n\n"
+                    f"💸 Đã hoàn tiền: <b>+{price:,}đ</b>\n"
+                    f"💼 Số dư: <b>{real_balance:,}đ</b>",
+                    build_main_keyboard()
+                )
+                
+                # Log
+                log_voucher_save(user_id, username, voucher_cmd, 1, 0, real_balance, f"❌ {result}")
+        
+        except Exception as e:
+            # ❌ EXCEPTION → Hoàn tiền và báo lỗi
+            dprint(f"[ERROR] Save voucher exception: {e}")
+            dprint(f"[ERROR] Traceback: {traceback.format_exc()}")
+            
+            update_balance_atomic(user_id, price)
+            real_balance = get_balance_direct(user_id)
+            
+            tg_send(
+                chat_id,
+                f"❌ <b>LỖI HỆ THỐNG</b>\n\n"
+                f"⚠️ Exception: {str(e)[:200]}\n\n"
+                f"💸 Đã hoàn tiền: <b>+{price:,}đ</b>\n"
+                f"💼 Số dư: <b>{real_balance:,}đ</b>",
+                build_main_keyboard()
+            )
+            
+            log_voucher_save(user_id, username, voucher_cmd, 1, 0, real_balance, f"❌ EXCEPTION")
+        
+        return
 
     if data.startswith("SOLD_OUT:"):
         tg_answer_callback(cb_id, "⚠️ Voucher này tạm hết mã. Vui lòng quay lại sau!", True)
@@ -2270,6 +3127,11 @@ def handle_update(update):
         tg_send_photo(chat_id, qr, caption)
         return
 
+    # ===== GET COOKIE QR =====
+    if text == "🔑 Get Cookie QR":
+        handle_get_cookie_qr(chat_id, user_id, username)
+        return
+
     # ===== USER DATA =====
     row, balance, status = get_user_data(user_id)
     if not row:
@@ -2309,15 +3171,22 @@ def handle_update(update):
         return
 
     # ===== HỆ THỐNG BOT =====
-    if text == "🧩 Hệ Thống Bot NgânMiu":
+    if text == "🧩 Hệ Thống Bot":
         system_menu = {
             "inline_keyboard": [
-                [{"text": "👤 Admin hỗ trợ", "url": "https://t.me/BonBonxHPx"}],
-                [{"text": "👥 Group Hỗ Trợ", "url": "https://t.me/botxshopee"}],
-                [{"text": "📱 Danh sách Bot", "callback_data": "SYSTEM:bot_list"}],
-                [{"text": "🔴 Bot Lưu Voucher", "url": "https://t.me/nganmiu_bot"}],
-                [{"text": "📦 Bot Check Đơn Hàng", "url": "https://t.me/ShopeeXCheck_Bot"}],
-                [{"text": "📲 Bot Thuê Số", "callback_data": "SYSTEM:coming_soon"}],
+                [
+                    {"text": "👤 Admin hỗ trợ", "url": "https://t.me/BonBonxHPx"},
+                    {"text": "👥 Group", "url": "https://t.me/botxshopee"}
+                ],
+                [
+                    {"text": "🔴 Bot Lưu Voucher", "url": "https://t.me/nganmiu_bot"}
+                ],
+                [
+                    {"text": "📦 Bot Check Đơn Hàng", "url": "https://t.me/ShopeeXCheck_Bot"}
+                ],
+                [
+                    {"text": "📲 Bot Thuê Số", "callback_data": "SYSTEM:coming_soon"}
+                ]
             ]
         }
         
@@ -2349,7 +3218,7 @@ def handle_update(update):
         # ✅ KHÔNG track_error - user thật có thể chưa active
         return
 
-    # ===== ĐANG CHỜ COOKIE =====
+    # ===== ĐANG CHỜ COOKIE HOẶC LINK =====
     if user_id in PENDING_VOUCHER and not text.startswith("/"):
         pending_data = PENDING_VOUCHER.pop(user_id)
         
@@ -2357,6 +3226,7 @@ def handle_update(update):
         if isinstance(pending_data, dict):
             cmd = pending_data["cmd"]
             pending_ts = pending_data["ts"]
+            pre_saved_cookie = pending_data.get("cookie")  # ← Cookie từ QUICK_SAVE
             
             # ✅ Check expired (quá 120s)
             if time.time() - pending_ts > PENDING_VOUCHER_TTL:
@@ -2371,12 +3241,20 @@ def handle_update(update):
         else:
             # Fallback cho format cũ (string)
             cmd = pending_data
+            pre_saved_cookie = None
 
-        cookies = parse_cookies(text)
+        # ✅ Nếu có cookie sẵn (QUICK_SAVE) → Text là voucher link
+        if pre_saved_cookie:
+            dprint(f"[QUICK_SAVE] Using pre-saved cookie for user {user_id}")
+            cookies = [pre_saved_cookie]
+            # Text chính là voucher link, không cần parse cookie
+        else:
+            # Parse cookie từ text như bình thường
+            cookies = parse_cookies(text)
 
-        if not cookies:
-            tg_send(chat_id, "❌ Không tìm thấy cookie hợp lệ")
-            return
+            if not cookies:
+                tg_send(chat_id, "❌ Không tìm thấy cookie hợp lệ")
+                return
 
         num_cookies = len(cookies)
         dprint(f"📊 Received {num_cookies} cookies")
