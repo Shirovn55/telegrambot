@@ -2061,7 +2061,7 @@ def build_voucher_keyboard_from_sheet():
         # ✅ DYNAMIC COMBO DETECTION
         combos_data = {}  # {combo_key: {price, count, vouchers}}
         
-        info_lines = ["🎊 <b>VOUCHER HIỆN CÓ - HAPPY NEW YEAR 2025!</b> 🎊\n━━━━━━━━━━━━━━━"]
+        info_lines = ["🎊 <b>THÔNG BÁO : Đã Hỗ Trợ Get Cookie miễn phí !</b> 🎊\n━━━━━━━━━━━━━━━"]
 
         for idx, row in enumerate(all_rows, 1):
             display = ""
